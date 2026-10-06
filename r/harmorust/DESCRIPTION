@@ -1,0 +1,16 @@
+Package: harmorust
+Title: Rust Native Kernels for Harmony Single-Cell Integration
+Version: 0.1.0
+Authors@R: person("Nebil", "Ibrahim", role = c("aut", "cre"))
+Description: Rust reimplementation of the Harmony integration loop
+    (soft k-means, diversity penalty, mixture-of-experts ridge) with the
+    same RunHarmony() signature used by the immunogenomics Harmony R
+    package. Designed to sit next to seurust: Seurat/seurust produce the
+    PCA embedding, harmorust corrects it.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Depends: R (>= 4.2)
+Imports: methods, Matrix
+Suggests: Seurat (>= 4.1.1), seurust, testthat
+SystemRequirements: Cargo (Rust's package manager), rustc >= 1.81
+RoxygenNote: 7.3.2

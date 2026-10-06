@@ -1,0 +1,9 @@
+/target
+/agent-tools
+/tmp-scaffold
+**/*.rs.bk
+.DS_Store
+web/node_modules
+web/.next
+web/out
+web/next-env.d.ts

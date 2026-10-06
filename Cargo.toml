@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/harmorust"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.81"
+version = "0.1.0"

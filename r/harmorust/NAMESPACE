@@ -1,0 +1,4 @@
+export(RunHarmony)
+export(harmony_options)
+S3method(RunHarmony, default)
+S3method(RunHarmony, Seurat)
