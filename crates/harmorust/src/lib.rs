@@ -17,6 +17,7 @@
 //! ```
 
 pub mod cluster;
+pub mod compare;
 pub mod config;
 pub mod correct;
 pub mod design;

@@ -53,4 +53,13 @@ The C++ hot path is already one file. Rust wins by:
 - O(covariates) diversity updates instead of scanning every one-hot row
 - No Rcpp / Armadillo copy at the R boundary once extendr is wired
 
-`cargo run -p harmorust -- bench --cells 4000` prints wall time on a synthetic atlas.
+Compare against CRAN `harmony` (the original C++ kernel) on the same synthetic atlas:
+
+```sh
+# requires R and install.packages("harmony")
+cargo run -p harmorust --release -- compare
+```
+
+The command prints a table of median wall times and `original / harmorust` speedup. Protocol: planted atlas, 20 PCs, 4 batches, 5 types, `nclust = 5`, `max_iter = 8`, early stopping off, `lambda = 1`, warmup then several measured repeats. `--cells`, `--repeats`, and `--warmup` are flags so the same harness can be re-run.
+
+`cargo run -p harmorust --release -- bench --cells 4000` still prints a single harmorust wall time.
