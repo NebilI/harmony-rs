@@ -43,16 +43,38 @@ seurat <- RunUMAP(seurat, reduction = "harmony")
 
 See [PARITY.md](PARITY.md) for the Harmony 2.0.4 checklist: what matches, what is faster, and what still needs an R fixture test.
 
-## Private GitHub repo
+## GitHub source, Origin mirror
 
-This tree is the project. To publish it as a **private** GitHub repo (default owner `NebilI/harmorust`):
+Intended layout:
+
+| Role | Repo |
+| --- | --- |
+| Source of truth | https://github.com/NebilI/harmony-rs (private) |
+| Mirror (browse / agents) | https://cursor.com/codebase/nebil-ibrahim/harmony-rs |
+
+Pushes to the Origin remote go to GitHub; Origin updates after GitHub accepts them. See [Mirror a GitHub repository](https://cursor.com/docs/origin/mirror-github).
+
+From a machine with both CLIs (macOS, Linux, or WSL — not PowerShell):
 
 ```sh
 gh auth login
+origin auth login
+./scripts/mirror-github.sh
+```
+
+That creates the private GitHub repo, pushes `main`, and (if the native Origin copy is in the way) tells you how to recreate it as a mirror. To delete the native Origin repo and recreate it as a GitHub mirror in one step:
+
+```sh
+RECREATE_ORIGIN_MIRROR=1 ./scripts/mirror-github.sh
+```
+
+You also need the [Cursor GitHub app](https://cursor.com/docs/origin/mirror-github) on the `NebilI` account. Push-only, without changing Origin:
+
+```sh
 ./scripts/push-github.sh
 ```
 
-Or export a `repo`-scoped token and run the same script (`GH_TOKEN`, optional `GITHUB_OWNER`, `GITHUB_REPO`). The script will not make the repository public unless you set `GITHUB_VISIBILITY=public`.
+Set `GITHUB_VISIBILITY=public` if you want the GitHub repo public. Defaults stay private.
 
 ## Run the Rust kernel
 

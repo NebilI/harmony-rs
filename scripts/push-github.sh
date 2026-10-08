@@ -4,7 +4,7 @@
 set -euo pipefail
 
 OWNER="${GITHUB_OWNER:-NebilI}"
-NAME="${GITHUB_REPO:-harmorust}"
+NAME="${GITHUB_REPO:-harmony-rs}"
 VISIBILITY="${GITHUB_VISIBILITY:-private}"
 
 if ! command -v gh >/dev/null 2>&1; then
