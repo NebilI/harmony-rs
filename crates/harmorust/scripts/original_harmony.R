@@ -90,14 +90,18 @@ if (warmup > 0L) {
   }
 }
 
+now_ms <- function() {
+  as.numeric(Sys.time()) * 1000
+}
+
 times_ms <- numeric(repeats)
 n_iter <- NA_integer_
 for (r in seq_len(repeats)) {
   gc(verbose = FALSE)
-  t0 <- proc.time()[["elapsed"]]
+  t0 <- now_ms()
   obj <- run_once()
-  t1 <- proc.time()[["elapsed"]]
-  times_ms[[r]] <- (t1 - t0) * 1000
+  t1 <- now_ms()
+  times_ms[[r]] <- t1 - t0
   n_iter <- max(0L, length(obj$objective_harmony) - 1L)
 }
 

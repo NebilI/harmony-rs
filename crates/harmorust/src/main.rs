@@ -135,6 +135,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         protocol.max_iter = args.next().ok_or("missing --max-iter")?.parse()?
                     }
                     "--ncores" => protocol.ncores = args.next().ok_or("missing --ncores")?.parse()?,
+                    "--nclust" => {
+                        let raw = args.next().ok_or("missing --nclust")?;
+                        protocol.nclust = if raw == "auto" {
+                            None
+                        } else {
+                            Some(raw.parse()?)
+                        };
+                    }
                     "--seed" => protocol.seed = args.next().ok_or("missing --seed")?.parse()?,
                     "--rscript" => {
                         opts.rscript = args.next().ok_or("missing --rscript")?.into();

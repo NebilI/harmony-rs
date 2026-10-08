@@ -35,6 +35,8 @@ pub struct CompareProtocol {
     pub theta: f64,
     pub sigma: f64,
     pub lambda: f64,
+    /// Soft clusters. `None` uses Harmony's default `min(round(N / 30), 100)`.
+    pub nclust: Option<usize>,
 }
 
 impl Default for CompareProtocol {
@@ -57,11 +59,20 @@ impl Default for CompareProtocol {
             theta: 2.0,
             sigma: 0.1,
             lambda: 1.0,
+            nclust: None,
         }
     }
 }
 
 impl CompareProtocol {
+    pub fn resolved_nclust(&self, n_cells: usize) -> usize {
+        HarmonyConfig {
+            nclust: self.nclust,
+            ..HarmonyConfig::default()
+        }
+        .resolved_nclust(n_cells)
+    }
+
     pub fn cases(&self) -> Vec<BenchCase> {
         self.cell_counts
             .iter()
@@ -76,7 +87,7 @@ impl CompareProtocol {
                     batch_strength: self.batch_strength,
                     seed: self.seed,
                 },
-                nclust: self.n_types,
+                nclust: self.resolved_nclust(n_cells),
             })
             .collect()
     }
@@ -163,6 +174,7 @@ pub struct ProtocolSummary {
     pub sigma: f64,
     pub lambda: f64,
     pub seed: u64,
+    pub nclust: Option<usize>,
 }
 
 impl From<&CompareProtocol> for ProtocolSummary {
@@ -181,6 +193,7 @@ impl From<&CompareProtocol> for ProtocolSummary {
             sigma: p.sigma,
             lambda: p.lambda,
             seed: p.seed,
+            nclust: p.nclust,
         }
     }
 }
@@ -463,10 +476,13 @@ pub fn print_report(report: &CompareReport, json: bool) {
     let p = &report.protocol;
     println!("Harmony kernel comparison");
     println!(
-        "protocol: {} PCs, {} batches, {} cell types, max_iter={}, max_iter_cluster={}, early_stop={}, lambda={}, ncores={}",
+        "protocol: {} PCs, {} batches, {} cell types, nclust={}, max_iter={}, max_iter_cluster={}, early_stop={}, lambda={}, ncores={}",
         p.n_pcs,
         p.n_batches,
         p.n_types,
+        p.nclust
+            .map(|k| k.to_string())
+            .unwrap_or_else(|| "auto min(round(N/30), 100)".into()),
         p.max_iter,
         p.max_iter_cluster,
         p.early_stop,
@@ -639,7 +655,8 @@ mod tests {
         let cases = CompareProtocol::default().cases();
         assert!(cases.len() >= 4);
         assert!(cases.windows(2).all(|w| w[0].spec.n_cells < w[1].spec.n_cells));
-        assert!(cases.iter().all(|c| c.nclust == 5));
+        assert_eq!(cases[0].nclust, 17); // min(round(500/30), 100)
+        assert_eq!(cases.last().unwrap().nclust, 100);
     }
 
     #[test]
@@ -670,7 +687,7 @@ mod tests {
     #[test]
     fn original_r_script_is_embedded() {
         assert!(ORIGINAL_R.contains("RunHarmony"));
-        assert!(ORIGINAL_R.contains("proc.time"));
+        assert!(ORIGINAL_R.contains("Sys.time"));
     }
 
     #[test]
