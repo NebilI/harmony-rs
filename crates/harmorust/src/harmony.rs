@@ -13,6 +13,12 @@ use serde::{Deserialize, Serialize};
 pub struct HarmonyResult {
     /// Corrected embeddings, cells × PCs (same orientation Harmony-R returns).
     pub embeddings: Vec<Vec<f64>>,
+    /// Soft cluster assignments R, clusters × cells.
+    pub r: Vec<Vec<f64>>,
+    /// Cluster centroids Y, PCs × clusters, L2-normalised.
+    pub y: Vec<Vec<f64>>,
+    /// Observed cluster×level counts O.
+    pub o: Vec<Vec<f64>>,
     pub n_iter: usize,
     pub converged: bool,
     pub n_clusters: usize,
@@ -187,8 +193,7 @@ impl HarmonyState {
             update_r(
                 &mut self.r,
                 &self.dist,
-                self.design.phi.view(),
-                &self.design.pr_b,
+                &self.design,
                 &self.theta,
                 &self.sigma,
                 &mut self.o,
@@ -263,6 +268,9 @@ impl HarmonyState {
 
         Ok(HarmonyResult {
             embeddings: array_to_cells_by_pc(&self.z_corr),
+            r: array_to_rows(&self.r),
+            y: array_to_rows(&self.y),
+            o: array_to_rows(&self.o),
             n_iter,
             converged,
             n_clusters: self.y.ncols(),
@@ -277,6 +285,12 @@ fn array_to_cells_by_pc(z: &Array2<f64>) -> Vec<Vec<f64>> {
     let d = z.nrows();
     (0..n)
         .map(|j| (0..d).map(|i| z[[i, j]]).collect())
+        .collect()
+}
+
+fn array_to_rows(z: &Array2<f64>) -> Vec<Vec<f64>> {
+    (0..z.nrows())
+        .map(|i| (0..z.ncols()).map(|j| z[[i, j]]).collect())
         .collect()
 }
 

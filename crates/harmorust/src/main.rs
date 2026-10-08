@@ -80,11 +80,44 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let out = integrate(&req)?;
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
+        "bench" => {
+            let mut cells = 4000usize;
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--cells" => cells = args.next().ok_or("missing --cells")?.parse()?,
+                    other => return Err(format!("unknown flag {other}").into()),
+                }
+            }
+            let spec = SimulateSpec {
+                n_cells: cells,
+                n_pcs: 20,
+                n_batches: 4,
+                n_types: 5,
+                batch_strength: 1.8,
+                seed: 1,
+            };
+            let atlas = simulate_atlas(&spec);
+            let z = embeddings_from_rows(&atlas.embeddings)?;
+            let cfg = HarmonyConfig {
+                nclust: Some(spec.n_types),
+                max_iter: 8,
+                seed: 1,
+                ..HarmonyConfig::default()
+            };
+            let start = std::time::Instant::now();
+            let out = run_harmony(z.view(), &atlas.batch, &cfg)?;
+            let elapsed = start.elapsed();
+            println!(
+                "cells={} pcs={} iters={} converged={} {:.2?}",
+                cells, spec.n_pcs, out.n_iter, out.converged, elapsed
+            );
+        }
         _ => {
             eprintln!("harmorust — Rust Harmony (seurust-style kernel port)\n");
             eprintln!("Usage:");
             eprintln!("  harmorust run < request.json");
             eprintln!("  harmorust demo [--cells N] [--batch-strength S] [--seed SEED]");
+            eprintln!("  harmorust bench [--cells N]");
         }
     }
     Ok(())

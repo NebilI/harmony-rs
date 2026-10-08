@@ -41,6 +41,19 @@ seurat <- harmorust::RunHarmony(seurat, group.by.vars = "donor")
 seurat <- RunUMAP(seurat, reduction = "harmony")
 ```
 
+See [PARITY.md](PARITY.md) for the Harmony 2.0.4 checklist: what matches, what is faster, and what still needs an R fixture test.
+
+## Private GitHub repo
+
+This tree is the project. To publish it as a **private** GitHub repo (default owner `NebilI/harmorust`):
+
+```sh
+gh auth login
+./scripts/push-github.sh
+```
+
+Or export a `repo`-scoped token and run the same script (`GH_TOKEN`, optional `GITHUB_OWNER`, `GITHUB_REPO`). The script will not make the repository public unless you set `GITHUB_VISIBILITY=public`.
+
 ## Run the Rust kernel
 
 Needs a Rust toolchain (`rustc` ≥ 1.81).
@@ -48,6 +61,7 @@ Needs a Rust toolchain (`rustc` ≥ 1.81).
 ```sh
 cargo test -p harmorust
 cargo run -p harmorust -- demo --cells 400 --batch-strength 2.4
+cargo run -p harmorust --release -- bench --cells 4000
 
 # JSON in, JSON out (cells × PCs + batch labels)
 cargo run -p harmorust -- run < request.json

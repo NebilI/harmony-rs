@@ -1,3 +1,4 @@
+use crate::design::Design;
 use crate::linalg::{column_l1_normalize, cosine_distance, l2_normalize_columns, softmax_neg_dist};
 use ndarray::{Array1, Array2, ArrayView2};
 use rand::seq::SliceRandom;
@@ -115,8 +116,7 @@ pub fn observed_expected(
 pub fn update_r(
     r: &mut Array2<f64>,
     dist: &Array2<f64>,
-    phi: ArrayView2<'_, f64>,
-    pr_b: &[f64],
+    design: &Design,
     theta: &[f64],
     sigma: &Array1<f64>,
     o: &mut Array2<f64>,
@@ -126,7 +126,8 @@ pub fn update_r(
 ) {
     let n = r.ncols();
     let k = r.nrows();
-    let b = phi.nrows();
+    let b = design.n_levels;
+    let n_cov = design.n_covariates;
     let mut order: Vec<usize> = (0..n).collect();
     order.shuffle(rng);
 
@@ -145,18 +146,19 @@ pub fn update_r(
         };
         let cells = &order[start..end];
 
-        // Remove this block from O, E
         for &j in cells {
             for i in 0..k {
                 let rij = r[[i, j]];
                 for bb in 0..b {
-                    e[[i, bb]] -= rij * pr_b[bb];
-                    o[[i, bb]] -= rij * phi[[bb, j]];
+                    e[[i, bb]] -= rij * design.pr_b[bb];
+                }
+                for ci in 0..n_cov {
+                    let bb = design.global_level(ci, j);
+                    o[[i, bb]] -= rij;
                 }
             }
         }
 
-        // Recompute R for the block (stable softmax)
         let mut block_r = Array2::<f64>::zeros((k, cells.len()));
         for (t, &j) in cells.iter().enumerate() {
             let mut max_logit = f64::NEG_INFINITY;
@@ -176,14 +178,11 @@ pub fn update_r(
             }
         }
 
-        // Diversity penalty: R *= ((2E+1)/(O+E+1))^θ * Φ
         for (t, &j) in cells.iter().enumerate() {
             for i in 0..k {
                 let mut penalty = 1.0;
-                for bb in 0..b {
-                    if phi[[bb, j]] == 0.0 {
-                        continue;
-                    }
+                for ci in 0..n_cov {
+                    let bb = design.global_level(ci, j);
                     let num = 2.0 * e[[i, bb]] + 1.0;
                     let den = o[[i, bb]] + e[[i, bb]] + 1.0;
                     penalty *= (num / den).powf(theta[bb]);
@@ -198,8 +197,11 @@ pub fn update_r(
                 r[[i, j]] = block_r[[i, t]];
                 let rij = r[[i, j]];
                 for bb in 0..b {
-                    e[[i, bb]] = (e[[i, bb]] + rij * pr_b[bb]).max(0.0);
-                    o[[i, bb]] = (o[[i, bb]] + rij * phi[[bb, j]]).max(0.0);
+                    e[[i, bb]] = (e[[i, bb]] + rij * design.pr_b[bb]).max(0.0);
+                }
+                for ci in 0..n_cov {
+                    let bb = design.global_level(ci, j);
+                    o[[i, bb]] = (o[[i, bb]] + rij).max(0.0);
                 }
             }
         }

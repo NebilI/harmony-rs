@@ -17,6 +17,10 @@ pub struct Design {
     pub pr_b: Vec<f64>,
     pub batch_sizes: Vec<f64>,
     pub level_names: Vec<String>,
+    /// Per-covariate level code for each cell.
+    pub level_of: Vec<Vec<usize>>,
+    /// Starting row in `phi` for each covariate.
+    pub covariate_offsets: Vec<usize>,
 }
 
 pub fn encode_labels(labels: &[impl AsRef<str>]) -> Result<Design> {
@@ -80,6 +84,12 @@ pub fn encode_covariates(covariates: &[Vec<String>]) -> Result<Design> {
         .map(|b| phi.row(b).sum())
         .collect();
     let pr_b: Vec<f64> = batch_sizes.iter().map(|s| s / n as f64).collect();
+    let mut covariate_offsets = Vec::with_capacity(levels_per_covariate.len());
+    let mut offset = 0usize;
+    for &nlev in &levels_per_covariate {
+        covariate_offsets.push(offset);
+        offset += nlev;
+    }
 
     Ok(Design {
         phi,
@@ -91,6 +101,8 @@ pub fn encode_covariates(covariates: &[Vec<String>]) -> Result<Design> {
         pr_b,
         batch_sizes,
         level_names,
+        level_of: cell_codes,
+        covariate_offsets,
     })
 }
 
@@ -127,4 +139,11 @@ pub fn expand_lambda(lambda_per_cov: &[f64], design: &Design) -> Vec<f64> {
     }
     let _ = offset;
     out
+}
+
+impl Design {
+    #[inline]
+    pub fn global_level(&self, covariate: usize, cell: usize) -> usize {
+        self.covariate_offsets[covariate] + self.level_of[covariate][cell]
+    }
 }
