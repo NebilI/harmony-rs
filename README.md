@@ -80,7 +80,7 @@ cargo run -p harmorust --release -- bench --cells 4000
 cargo run -p harmorust --release -- compare
 ```
 
-`compare` builds a synthetic atlas at several cell counts, runs both kernels with the same hyperparameters (`max_iter=8`, early stopping off, `nclust` = cell types), and prints median wall time plus a speedup column (`original / harmorust`). Repeat it whenever you want fresh numbers:
+`compare` builds a synthetic atlas at several cell counts, runs both kernels with the same hyperparameters (`max_iter=8`, early stopping off, Harmony's default `nclust`), and prints median wall time plus a speedup column (`original / harmorust`). Repeat it whenever you want fresh numbers:
 
 ```sh
 cargo run -p harmorust --release -- compare --cells 500,2000,8000 --repeats 7 --warmup 2
