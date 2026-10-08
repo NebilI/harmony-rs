@@ -56,7 +56,7 @@ cargo run -p harmorust --release -- compare
 
 Both kernels get the same embeddings and hyperparameters (`max_iter = 8`, early stopping off, `lambda = 1`, 20 PCs, 4 batches). Times are **median wall time** after 2 warmup runs and 5 measured repeats. **Speedup** is original / harmorust (>1 means harmorust is faster).
 
-Measured on a 4-core Intel Xeon, OpenBLAS 0.3.26, Harmony 2.0.5, harmorust 0.1.0 (`ncores=4`), after caching the distance softmax and the cluster × batch diversity table in `update_r`.
+Measured on a 4-core Intel Xeon, OpenBLAS 0.3.26, Harmony 2.0.5, harmorust 0.1.0 (`ncores=4`), after the `update_r` cache and incremental k-means++ seeding.
 
 ### Default `nclust = min(round(N/30), 100)`
 
@@ -64,13 +64,13 @@ This is Harmony's usual workload (many soft clusters, one ridge fit each).
 
 | Case | Cells | PCs | Clusters | Original Harmony | harmorust | Speedup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| atlas-500 | 500 | 20 | 17 | 16.0 ms | 12.4 ms | 1.29× |
-| atlas-1000 | 1000 | 20 | 33 | 46.7 ms | 41.3 ms | 1.13× |
-| atlas-2000 | 2000 | 20 | 67 | 171.4 ms | 183.6 ms | 0.93× |
-| atlas-4000 | 4000 | 20 | 100 | 519.7 ms | 608.4 ms | 0.85× |
-| atlas-8000 | 8000 | 20 | 100 | 1.12 s | 1.34 s | 0.84× |
+| atlas-500 | 500 | 20 | 17 | 16.4 ms | 10.4 ms | 1.57× |
+| atlas-1000 | 1000 | 20 | 33 | 47.5 ms | 36.8 ms | 1.29× |
+| atlas-2000 | 2000 | 20 | 67 | 173.9 ms | 153.4 ms | 1.13× |
+| atlas-4000 | 4000 | 20 | 100 | 519.0 ms | 482.3 ms | 1.08× |
+| atlas-8000 | 8000 | 20 | 100 | 1.13 s | 1.07 s | 1.06× |
 
-Geometric-mean speedup: **0.99×** (was 0.66× before the `update_r` change). At 8k cells harmorust went 1.96 s → 1.34 s.
+Geometric-mean speedup: **1.21×** (was 0.99× after `update_r` alone). At 8k cells harmorust went 1.34 s → 1.07 s.
 
 ### Small `nclust = 5` (matched to planted cell types)
 
@@ -78,19 +78,14 @@ Same atlas as `harmorust bench`, with `nclust` pinned to biology rather than Har
 
 | Case | Cells | PCs | Clusters | Original Harmony | harmorust | Speedup |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| atlas-500 | 500 | 20 | 5 | 8.44 ms | 3.61 ms | 2.34× |
-| atlas-1000 | 1000 | 20 | 5 | 13.7 ms | 6.81 ms | 2.01× |
-| atlas-2000 | 2000 | 20 | 5 | 23.8 ms | 13.7 ms | 1.74× |
-| atlas-4000 | 4000 | 20 | 5 | 45.3 ms | 25.6 ms | 1.77× |
-| atlas-8000 | 8000 | 20 | 5 | 89.3 ms | 50.0 ms | 1.78× |
+| atlas-500 | 500 | 20 | 5 | 8.57 ms | 3.24 ms | 2.64× |
+| atlas-1000 | 1000 | 20 | 5 | 13.7 ms | 6.60 ms | 2.07× |
+| atlas-2000 | 2000 | 20 | 5 | 24.2 ms | 13.0 ms | 1.87× |
+| atlas-4000 | 4000 | 20 | 5 | 46.5 ms | 24.7 ms | 1.89× |
+| atlas-8000 | 8000 | 20 | 5 | 91.7 ms | 49.6 ms | 1.85× |
 
-Geometric-mean speedup: **1.92×** (was 1.12×).
+Geometric-mean speedup: **2.04×** (was 1.92×). Small K barely moves; seeding was cheap there already.
 
-The C++ hot path is already one file and is linked to OpenBLAS. harmorust still has room on the default-`nclust` path (centroid seeding, objective, per-cluster ridge). Next intended wins:
-
-- Rayon over independent per-cluster ridge fits
-- `ndarray` GEMM for cosine distances (`YᵀZ`)
-- O(covariates) diversity updates instead of scanning every one-hot row
-- No Rcpp / Armadillo copy at the R boundary once extendr is wired
+The C++ hot path is already one file and is linked to OpenBLAS. Remaining cost is mostly the objective and per-cluster ridge fits.
 
 `cargo run -p harmorust --release -- bench --cells 4000` still prints a single harmorust wall time.
