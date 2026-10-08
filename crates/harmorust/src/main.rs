@@ -1,3 +1,4 @@
+use harmorust::compare::{print_report, run_compare, CompareOptions, CompareProtocol};
 use harmorust::{
     embeddings_from_rows, evaluate, run_harmony, simulate_atlas, HarmonyConfig, SimulateSpec,
 };
@@ -112,15 +113,74 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 cells, spec.n_pcs, out.n_iter, out.converged, elapsed
             );
         }
+        "compare" => {
+            let mut protocol = CompareProtocol::default();
+            let mut opts = CompareOptions::default();
+            let mut json = false;
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--cells" => {
+                        protocol.cell_counts = parse_usize_list(&args.next().ok_or("missing --cells")?)?
+                    }
+                    "--pcs" => protocol.n_pcs = args.next().ok_or("missing --pcs")?.parse()?,
+                    "--batches" => {
+                        protocol.n_batches = args.next().ok_or("missing --batches")?.parse()?
+                    }
+                    "--types" => protocol.n_types = args.next().ok_or("missing --types")?.parse()?,
+                    "--warmup" => protocol.warmup = args.next().ok_or("missing --warmup")?.parse()?,
+                    "--repeats" => {
+                        protocol.repeats = args.next().ok_or("missing --repeats")?.parse()?
+                    }
+                    "--max-iter" => {
+                        protocol.max_iter = args.next().ok_or("missing --max-iter")?.parse()?
+                    }
+                    "--ncores" => protocol.ncores = args.next().ok_or("missing --ncores")?.parse()?,
+                    "--nclust" => {
+                        let raw = args.next().ok_or("missing --nclust")?;
+                        protocol.nclust = if raw == "auto" {
+                            None
+                        } else {
+                            Some(raw.parse()?)
+                        };
+                    }
+                    "--seed" => protocol.seed = args.next().ok_or("missing --seed")?.parse()?,
+                    "--rscript" => {
+                        opts.rscript = args.next().ok_or("missing --rscript")?.into();
+                    }
+                    "--rust-only" => opts.rust_only = true,
+                    "--json" => json = true,
+                    "--early-stop" => protocol.early_stop = true,
+                    other => return Err(format!("unknown flag {other}").into()),
+                }
+            }
+            std::env::set_var("RAYON_NUM_THREADS", protocol.ncores.max(1).to_string());
+            let report = run_compare(&protocol, &opts)?;
+            print_report(&report, json);
+        }
         _ => {
             eprintln!("harmorust — Rust Harmony (seurust-style kernel port)\n");
             eprintln!("Usage:");
             eprintln!("  harmorust run < request.json");
             eprintln!("  harmorust demo [--cells N] [--batch-strength S] [--seed SEED]");
             eprintln!("  harmorust bench [--cells N]");
+            eprintln!("  harmorust compare [--cells N,N,...] [--warmup W] [--repeats R] [--ncores N]");
         }
     }
     Ok(())
+}
+
+fn parse_usize_list(raw: &str) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+    let cells: Result<Vec<usize>, _> = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<usize>())
+        .collect();
+    let cells = cells?;
+    if cells.is_empty() {
+        return Err("need at least one cell count".into());
+    }
+    Ok(cells)
 }
 
 fn integrate(req: &RunRequest) -> Result<RunResponse, Box<dyn std::error::Error>> {
