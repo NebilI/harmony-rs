@@ -76,6 +76,19 @@ cargo test -p harmorust
 cargo run -p harmorust -- demo --cells 400 --batch-strength 2.4
 cargo run -p harmorust --release -- bench --cells 4000
 
+# harmorust vs immunogenomics/harmony C++ (needs R + CRAN harmony)
+cargo run -p harmorust --release -- compare
+```
+
+`compare` builds a synthetic atlas at several cell counts, runs both kernels with the same hyperparameters (`max_iter=8`, early stopping off, Harmony's default `nclust`), and prints median wall time plus a speedup column (`original / harmorust`). Repeat it whenever you want fresh numbers:
+
+```sh
+cargo run -p harmorust --release -- compare --cells 500,2000,8000 --repeats 7 --warmup 2
+cargo run -p harmorust --release -- compare --nclust 5
+```
+
+On a 4-core Xeon against Harmony 2.0.5, default `nclust` was **0.66×** (C++ faster) and `nclust=5` was **1.12×**. Full tables are in [PARITY.md](PARITY.md).
+
 # JSON in, JSON out (cells × PCs + batch labels)
 cargo run -p harmorust -- run < request.json
 ```
