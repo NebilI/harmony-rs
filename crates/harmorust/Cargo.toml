@@ -8,6 +8,7 @@ description = "Rust port of the Harmony single-cell integration algorithm (Korsu
 readme = "README.md"
 keywords = ["bioinformatics", "single-cell", "harmony", "batch-correction"]
 categories = ["science"]
+repository = "https://cursor.com/codebase/nebil-ibrahim/harmony-rs"
 
 [lib]
 name = "harmorust"
