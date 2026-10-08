@@ -1,5 +1,5 @@
 use crate::design::Design;
-use crate::linalg::{column_l1_normalize, cosine_distance, l2_normalize_columns, softmax_neg_dist};
+use crate::linalg::{cosine_distance, l2_normalize_columns, softmax_neg_dist};
 use ndarray::{Array1, Array2, ArrayView2};
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -113,12 +113,17 @@ pub fn observed_expected(
 }
 
 /// Online block update of soft assignments with the Harmony diversity penalty.
+///
+/// `r_base` is the distance-only softmax `softmax(-dist / σ)`. Centroids (and
+/// therefore distances) are fixed for a clustering round, so the caller computes
+/// it once and we reuse it for every inner pass and every block. The diversity
+/// term `((2E+1)/(O+E+1))^θ` lives on the cluster × batch table, so `pow` runs
+/// `K · B` times per block instead of once per cell.
 pub fn update_r(
     r: &mut Array2<f64>,
-    dist: &Array2<f64>,
+    r_base: ArrayView2<'_, f64>,
     design: &Design,
     theta: &[f64],
-    sigma: &Array1<f64>,
     o: &mut Array2<f64>,
     e: &mut Array2<f64>,
     block_size: f64,
@@ -133,6 +138,9 @@ pub fn update_r(
 
     let n_blocks = ((1.0 / block_size).ceil() as usize).max(1);
     let cells_per_block = ((n as f64 * block_size) as usize).max(1);
+    let mut penalty = Array2::<f64>::zeros((k, b));
+    let mut col = vec![0.0f64; k];
+    let mut cluster_sum = vec![0.0f64; k];
 
     for block in 0..n_blocks {
         let start = block * cells_per_block;
@@ -146,63 +154,62 @@ pub fn update_r(
         };
         let cells = &order[start..end];
 
+        cluster_sum.fill(0.0);
         for &j in cells {
             for i in 0..k {
                 let rij = r[[i, j]];
-                for bb in 0..b {
-                    e[[i, bb]] -= rij * design.pr_b[bb];
-                }
+                cluster_sum[i] += rij;
                 for ci in 0..n_cov {
-                    let bb = design.global_level(ci, j);
-                    o[[i, bb]] -= rij;
+                    o[[i, design.global_level(ci, j)]] -= rij;
                 }
             }
         }
-
-        let mut block_r = Array2::<f64>::zeros((k, cells.len()));
-        for (t, &j) in cells.iter().enumerate() {
-            let mut max_logit = f64::NEG_INFINITY;
-            for i in 0..k {
-                max_logit = max_logit.max(-dist[[i, j]] / sigma[i]);
+        for i in 0..k {
+            let s = cluster_sum[i];
+            for bb in 0..b {
+                e[[i, bb]] -= s * design.pr_b[bb];
             }
+        }
+
+        for i in 0..k {
+            for bb in 0..b {
+                let num = 2.0 * e[[i, bb]] + 1.0;
+                let den = o[[i, bb]] + e[[i, bb]] + 1.0;
+                penalty[[i, bb]] = (num / den).powf(theta[bb]);
+            }
+        }
+
+        cluster_sum.fill(0.0);
+        for &j in cells {
             let mut sum = 0.0;
             for i in 0..k {
-                let v = (-dist[[i, j]] / sigma[i] - max_logit).exp();
-                block_r[[i, t]] = v;
-                sum += v;
+                let mut p = r_base[[i, j]];
+                for ci in 0..n_cov {
+                    p *= penalty[[i, design.global_level(ci, j)]];
+                }
+                col[i] = p;
+                sum += p;
             }
             if sum > 0.0 {
+                let inv = 1.0 / sum;
                 for i in 0..k {
-                    block_r[[i, t]] /= sum;
+                    col[i] *= inv;
                 }
             }
-        }
-
-        for (t, &j) in cells.iter().enumerate() {
             for i in 0..k {
-                let mut penalty = 1.0;
-                for ci in 0..n_cov {
-                    let bb = design.global_level(ci, j);
-                    let num = 2.0 * e[[i, bb]] + 1.0;
-                    let den = o[[i, bb]] + e[[i, bb]] + 1.0;
-                    penalty *= (num / den).powf(theta[bb]);
-                }
-                block_r[[i, t]] *= penalty;
-            }
-        }
-        block_r = column_l1_normalize(block_r);
-
-        for (t, &j) in cells.iter().enumerate() {
-            for i in 0..k {
-                r[[i, j]] = block_r[[i, t]];
-                let rij = r[[i, j]];
-                for bb in 0..b {
-                    e[[i, bb]] = (e[[i, bb]] + rij * design.pr_b[bb]).max(0.0);
-                }
+                let rij = col[i];
+                r[[i, j]] = rij;
+                cluster_sum[i] += rij;
                 for ci in 0..n_cov {
                     let bb = design.global_level(ci, j);
                     o[[i, bb]] = (o[[i, bb]] + rij).max(0.0);
                 }
+            }
+        }
+        for i in 0..k {
+            let s = cluster_sum[i];
+            for bb in 0..b {
+                e[[i, bb]] = (e[[i, bb]] + s * design.pr_b[bb]).max(0.0);
             }
         }
     }
@@ -246,4 +253,202 @@ pub fn objective(
     }
 
     (kmeans_error + entropy + cross) * norm
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::design::encode_labels;
+    use crate::linalg::column_l1_normalize;
+    use ndarray::Array2;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    /// Previous per-cell `exp` / `pow` loop. Kept to prove the table-based
+    /// update matches it on a fixed seed.
+    fn reference_update_r(
+        r: &mut Array2<f64>,
+        dist: &Array2<f64>,
+        design: &Design,
+        theta: &[f64],
+        sigma: &Array1<f64>,
+        o: &mut Array2<f64>,
+        e: &mut Array2<f64>,
+        block_size: f64,
+        rng: &mut impl Rng,
+    ) {
+        let n = r.ncols();
+        let k = r.nrows();
+        let b = design.n_levels;
+        let n_cov = design.n_covariates;
+        let mut order: Vec<usize> = (0..n).collect();
+        order.shuffle(rng);
+
+        let n_blocks = ((1.0 / block_size).ceil() as usize).max(1);
+        let cells_per_block = ((n as f64 * block_size) as usize).max(1);
+
+        for block in 0..n_blocks {
+            let start = block * cells_per_block;
+            if start >= n {
+                break;
+            }
+            let end = if block + 1 == n_blocks {
+                n
+            } else {
+                ((block + 1) * cells_per_block).min(n)
+            };
+            let cells = &order[start..end];
+
+            for &j in cells {
+                for i in 0..k {
+                    let rij = r[[i, j]];
+                    for bb in 0..b {
+                        e[[i, bb]] -= rij * design.pr_b[bb];
+                    }
+                    for ci in 0..n_cov {
+                        let bb = design.global_level(ci, j);
+                        o[[i, bb]] -= rij;
+                    }
+                }
+            }
+
+            let mut block_r = Array2::<f64>::zeros((k, cells.len()));
+            for (t, &j) in cells.iter().enumerate() {
+                let mut max_logit = f64::NEG_INFINITY;
+                for i in 0..k {
+                    max_logit = max_logit.max(-dist[[i, j]] / sigma[i]);
+                }
+                let mut sum = 0.0;
+                for i in 0..k {
+                    let v = (-dist[[i, j]] / sigma[i] - max_logit).exp();
+                    block_r[[i, t]] = v;
+                    sum += v;
+                }
+                if sum > 0.0 {
+                    for i in 0..k {
+                        block_r[[i, t]] /= sum;
+                    }
+                }
+            }
+
+            for (t, &j) in cells.iter().enumerate() {
+                for i in 0..k {
+                    let mut penalty = 1.0;
+                    for ci in 0..n_cov {
+                        let bb = design.global_level(ci, j);
+                        let num = 2.0 * e[[i, bb]] + 1.0;
+                        let den = o[[i, bb]] + e[[i, bb]] + 1.0;
+                        penalty *= (num / den).powf(theta[bb]);
+                    }
+                    block_r[[i, t]] *= penalty;
+                }
+            }
+            block_r = column_l1_normalize(block_r);
+
+            for (t, &j) in cells.iter().enumerate() {
+                for i in 0..k {
+                    r[[i, j]] = block_r[[i, t]];
+                    let rij = r[[i, j]];
+                    for bb in 0..b {
+                        e[[i, bb]] = (e[[i, bb]] + rij * design.pr_b[bb]).max(0.0);
+                    }
+                    for ci in 0..n_cov {
+                        let bb = design.global_level(ci, j);
+                        o[[i, bb]] = (o[[i, bb]] + rij).max(0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    fn tiny_state(n_cov: usize) -> (Array2<f64>, Array2<f64>, Array1<f64>, Design, Vec<f64>) {
+        let n = 40usize;
+        let k = 6usize;
+        let d = 4usize;
+        let mut rng = ChaCha8Rng::seed_from_u64(3);
+        let mut z = Array2::<f64>::zeros((d, n));
+        for j in 0..n {
+            for i in 0..d {
+                z[[i, j]] = rng.gen::<f64>() - 0.5;
+            }
+        }
+        z = l2_normalize_columns(z.view());
+        let y = kmeans_cosine(z.view(), k, &mut rng, 4);
+        let sigma = Array1::from_elem(k, 0.1);
+        let (r, dist) = init_r(y.view(), z.view(), &sigma);
+        let batch: Vec<String> = (0..n)
+            .map(|j| if j % 2 == 0 { "A".into() } else { "B".into() })
+            .collect();
+        let design = if n_cov == 1 {
+            encode_labels(&batch).unwrap()
+        } else {
+            let proto: Vec<String> = (0..n)
+                .map(|j| if j % 3 == 0 { "v2".into() } else { "v3".into() })
+                .collect();
+            crate::design::encode_covariates(&[batch, proto]).unwrap()
+        };
+        let theta = vec![2.0; design.n_levels];
+        let _ = dist;
+        (r, z, sigma, design, theta)
+    }
+
+    #[test]
+    fn update_r_matches_per_cell_reference() {
+        for n_cov in [1usize, 2] {
+            let (r0, z, sigma, design, theta) = tiny_state(n_cov);
+            let y = kmeans_cosine(z.view(), r0.nrows(), &mut ChaCha8Rng::seed_from_u64(9), 2);
+            let (r, dist) = init_r(y.view(), z.view(), &sigma);
+            let (o, e) = observed_expected(r.view(), design.phi.view(), &design.pr_b);
+            let r_base = softmax_neg_dist(dist.view(), sigma.view());
+
+            let mut r_fast = r.clone();
+            let mut o_fast = o.clone();
+            let mut e_fast = e.clone();
+            let mut r_slow = r.clone();
+            let mut o_slow = o.clone();
+            let mut e_slow = e.clone();
+
+            update_r(
+                &mut r_fast,
+                r_base.view(),
+                &design,
+                &theta,
+                &mut o_fast,
+                &mut e_fast,
+                0.2,
+                &mut ChaCha8Rng::seed_from_u64(21),
+            );
+            reference_update_r(
+                &mut r_slow,
+                &dist,
+                &design,
+                &theta,
+                &sigma,
+                &mut o_slow,
+                &mut e_slow,
+                0.2,
+                &mut ChaCha8Rng::seed_from_u64(21),
+            );
+
+            for i in 0..r.nrows() {
+                for j in 0..r.ncols() {
+                    let diff = (r_fast[[i, j]] - r_slow[[i, j]]).abs();
+                    assert!(
+                        diff < 1e-9,
+                        "R mismatch at [{i},{j}] n_cov={n_cov}: {diff}"
+                    );
+                }
+            }
+            for i in 0..o.nrows() {
+                for bb in 0..o.ncols() {
+                    assert!((o_fast[[i, bb]] - o_slow[[i, bb]]).abs() < 1e-8);
+                    assert!((e_fast[[i, bb]] - e_slow[[i, bb]]).abs() < 1e-8);
+                }
+            }
+            for j in 0..r.ncols() {
+                let col: f64 = (0..r.nrows()).map(|i| r_fast[[i, j]]).sum();
+                assert!((col - 1.0).abs() < 1e-8, "column {j} summed to {col}");
+            }
+        }
+    }
 }
