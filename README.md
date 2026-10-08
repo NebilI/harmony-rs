@@ -45,36 +45,27 @@ See [PARITY.md](PARITY.md) for the Harmony 2.0.4 checklist: what matches, what i
 
 ## GitHub source, Origin mirror
 
-Intended layout:
-
 | Role | Repo |
 | --- | --- |
 | Source of truth | https://github.com/NebilI/harmony-rs (private) |
 | Mirror (browse / agents) | https://github.com/NebilI/harmony-rs |
 
-Pushes to the Origin remote go to GitHub; Origin updates after GitHub accepts them. See [Mirror a GitHub repository](https://github.com/NebilI/harmony-rs).
-
-From a machine with both CLIs (macOS, Linux, or WSL — not PowerShell):
+GitHub already has `main`. To make the existing Origin repo a GitHub mirror (GitHub stays the source of truth; Origin browse/search stay put), you need the [Cursor GitHub app](https://github.com/NebilI/harmony-rs) on `NebilI`, then from WSL / macOS / Linux:
 
 ```sh
-gh auth login
 origin auth login
-
-```
-
-That creates the private GitHub repo, pushes `main`, and (if the native Origin copy is in the way) tells you how to recreate it as a mirror. To delete the native Origin repo and recreate it as a GitHub mirror in one step:
-
-```sh
 RECREATE_ORIGIN_MIRROR=1 
 ```
 
-You also need the [Cursor GitHub app](https://github.com/NebilI/harmony-rs) on the `NebilI` account. Push-only, without changing Origin:
+Or in the UI: [github.com/NebilI](https://github.com/NebilI) → Sync from GitHub → `NebilI/harmony-rs`. If the native Origin name is taken, delete or detach that copy first.
+
+After the mirror is attached, pushes to the Origin remote go to GitHub; Origin updates after GitHub accepts them. See [Mirror a GitHub repository](https://github.com/NebilI/harmony-rs).
+
+Push-only updates to GitHub:
 
 ```sh
 
 ```
-
-Set `GITHUB_VISIBILITY=public` if you want the GitHub repo public. Defaults stay private.
 
 ## Run the Rust kernel
 
