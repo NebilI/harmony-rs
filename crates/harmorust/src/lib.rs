@@ -184,4 +184,18 @@ mod tests {
         assert_eq!(a.embeddings, b.embeddings);
         assert_eq!(a.n_iter, b.n_iter);
     }
+
+    #[test]
+    fn assignments_are_a_simplex_and_auto_lambda_runs() {
+        let (data, mut cfg) = toy_atlas();
+        cfg.lambda = None;
+        cfg.max_iter = 4;
+        let z = embeddings_from_rows(&data.embeddings).unwrap();
+        let out = run_harmony(z.view(), &data.batch, &cfg).unwrap();
+        assert_eq!(out.r.len(), out.n_clusters);
+        for j in 0..data.n_cells {
+            let col: f64 = out.r.iter().map(|row| row[j]).sum();
+            assert!((col - 1.0).abs() < 1e-6, "R column {j} summed to {col}");
+        }
+    }
 }
