@@ -18,27 +18,29 @@ pub fn kmeans_cosine(
 
     let first = rng.gen_range(0..n);
     y.column_mut(0).assign(&z.column(first));
-    let mut chosen = vec![first];
+    let mut chosen = vec![false; n];
+    chosen[first] = true;
+    // Running nearest-centroid cosine distance. After each new seed we only
+    // compare against that seed, not the whole chosen set.
+    let mut min_dist = vec![f64::INFINITY; n];
 
     for c in 1..k {
-        let mut min_dist = vec![f64::INFINITY; n];
+        let prev = c - 1;
         for j in 0..n {
-            for prev in 0..c {
-                let mut sim = 0.0;
-                for i in 0..d {
-                    sim += y[[i, prev]] * z[[i, j]];
-                }
-                let dist = (2.0 * (1.0 - sim)).abs().max(1e-12);
-                if dist < min_dist[j] {
-                    min_dist[j] = dist;
-                }
+            let mut sim = 0.0;
+            for i in 0..d {
+                sim += y[[i, prev]] * z[[i, j]];
+            }
+            let dist = (2.0 * (1.0 - sim)).abs().max(1e-12);
+            if dist < min_dist[j] {
+                min_dist[j] = dist;
             }
         }
         // Harmony's weighted sample: pick argmin of -log(U) / dist
         let mut best_idx = 0usize;
         let mut best_score = f64::INFINITY;
         for j in 0..n {
-            if chosen.contains(&j) {
+            if chosen[j] {
                 continue;
             }
             let u: f64 = rng.gen::<f64>().clamp(1e-12, 1.0);
@@ -48,7 +50,7 @@ pub fn kmeans_cosine(
                 best_idx = j;
             }
         }
-        chosen.push(best_idx);
+        chosen[best_idx] = true;
         y.column_mut(c).assign(&z.column(best_idx));
     }
 
@@ -260,7 +262,7 @@ mod tests {
     use super::*;
     use crate::design::encode_labels;
     use crate::linalg::column_l1_normalize;
-    use ndarray::Array2;
+    use ndarray::{Array2, ArrayView2};
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
@@ -448,6 +450,113 @@ mod tests {
             for j in 0..r.ncols() {
                 let col: f64 = (0..r.nrows()).map(|i| r_fast[[i, j]]).sum();
                 assert!((col - 1.0).abs() < 1e-8, "column {j} summed to {col}");
+            }
+        }
+    }
+
+    /// Previous k-means++ that recomputed every cell-to-centroid distance for
+    /// every new seed.
+    fn reference_kmeans_cosine(
+        z: ArrayView2<'_, f64>,
+        k: usize,
+        rng: &mut impl Rng,
+        iters: usize,
+    ) -> Array2<f64> {
+        let d = z.nrows();
+        let n = z.ncols();
+        let k = k.min(n).max(1);
+        let mut y = Array2::<f64>::zeros((d, k));
+        let first = rng.gen_range(0..n);
+        y.column_mut(0).assign(&z.column(first));
+        let mut chosen = vec![first];
+
+        for c in 1..k {
+            let mut min_dist = vec![f64::INFINITY; n];
+            for j in 0..n {
+                for prev in 0..c {
+                    let mut sim = 0.0;
+                    for i in 0..d {
+                        sim += y[[i, prev]] * z[[i, j]];
+                    }
+                    let dist = (2.0 * (1.0 - sim)).abs().max(1e-12);
+                    if dist < min_dist[j] {
+                        min_dist[j] = dist;
+                    }
+                }
+            }
+            let mut best_idx = 0usize;
+            let mut best_score = f64::INFINITY;
+            for j in 0..n {
+                if chosen.contains(&j) {
+                    continue;
+                }
+                let u: f64 = rng.gen::<f64>().clamp(1e-12, 1.0);
+                let score = -u.ln() / min_dist[j];
+                if score < best_score {
+                    best_score = score;
+                    best_idx = j;
+                }
+            }
+            chosen.push(best_idx);
+            y.column_mut(c).assign(&z.column(best_idx));
+        }
+
+        y = l2_normalize_columns(y.view());
+        for _ in 0..iters {
+            let dist = cosine_distance(y.view(), z);
+            let mut counts = vec![0.0f64; k];
+            let mut next = Array2::<f64>::zeros((d, k));
+            for j in 0..n {
+                let mut best = 0usize;
+                let mut best_d = f64::INFINITY;
+                for c in 0..k {
+                    let dval = dist[[c, j]];
+                    if dval < best_d {
+                        best_d = dval;
+                        best = c;
+                    }
+                }
+                counts[best] += 1.0;
+                for i in 0..d {
+                    next[[i, best]] += z[[i, j]];
+                }
+            }
+            for c in 0..k {
+                if counts[c] > 0.0 {
+                    for i in 0..d {
+                        next[[i, c]] /= counts[c];
+                    }
+                } else {
+                    next.column_mut(c).assign(&y.column(c));
+                }
+            }
+            y = l2_normalize_columns(next.view());
+        }
+        y
+    }
+
+    #[test]
+    fn incremental_kmeans_pp_matches_nested_distance_scan() {
+        let d = 8usize;
+        let n = 120usize;
+        let k = 25usize;
+        let mut rng = ChaCha8Rng::seed_from_u64(4);
+        let mut z = Array2::<f64>::zeros((d, n));
+        for j in 0..n {
+            for i in 0..d {
+                z[[i, j]] = rng.gen::<f64>() - 0.5;
+            }
+        }
+        z = l2_normalize_columns(z.view());
+
+        let fast = kmeans_cosine(z.view(), k, &mut ChaCha8Rng::seed_from_u64(11), 6);
+        let slow = reference_kmeans_cosine(z.view(), k, &mut ChaCha8Rng::seed_from_u64(11), 6);
+        assert_eq!(fast.nrows(), slow.nrows());
+        assert_eq!(fast.ncols(), slow.ncols());
+        for i in 0..fast.nrows() {
+            for j in 0..fast.ncols() {
+                let diff = (fast[[i, j]] - slow[[i, j]]).abs();
+                assert!(diff < 1e-12, "centroid mismatch at [{i},{j}]: {diff}");
             }
         }
     }
