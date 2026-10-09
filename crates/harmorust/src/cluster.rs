@@ -222,35 +222,44 @@ pub fn objective(
     dist: ArrayView2<'_, f64>,
     o: ArrayView2<'_, f64>,
     e: ArrayView2<'_, f64>,
-    phi: ArrayView2<'_, f64>,
+    design: &Design,
     theta: &[f64],
     sigma: &Array1<f64>,
 ) -> f64 {
-    let n = r.ncols() as f64;
+    let n = r.ncols();
     let k = r.nrows();
-    let b = phi.nrows();
-    let norm = 2000.0 / n;
+    let b = design.n_levels;
+    let n_cov = design.n_covariates;
+    let norm = 2000.0 / n as f64;
+
+    // `θ · log((O+E+1)/(2E+1))` depends only on cluster and batch. Harmony
+    // builds this K×B table once; looking it up per cell avoids a `ln` and a
+    // dense scan of Φ for every assignment.
+    let mut log_table = Array2::<f64>::zeros((k, b));
+    for i in 0..k {
+        for bb in 0..b {
+            let ratio = (o[[i, bb]] + e[[i, bb]] + 1.0) / (2.0 * e[[i, bb]] + 1.0);
+            log_table[[i, bb]] = theta[bb] * ratio.ln();
+        }
+    }
 
     let mut kmeans_error = 0.0;
     let mut entropy = 0.0;
     let mut cross = 0.0;
 
     for i in 0..k {
-        for j in 0..r.ncols() {
+        let sigma_i = sigma[i];
+        for j in 0..n {
             let rij = r[[i, j]];
             kmeans_error += rij * dist[[i, j]];
             if rij > 0.0 {
-                entropy += rij * rij.ln() * sigma[i];
+                entropy += rij * rij.ln() * sigma_i;
             }
             let mut log_pen = 0.0;
-            for bb in 0..b {
-                if phi[[bb, j]] == 0.0 {
-                    continue;
-                }
-                let ratio = (o[[i, bb]] + e[[i, bb]] + 1.0) / (2.0 * e[[i, bb]] + 1.0);
-                log_pen += theta[bb] * ratio.ln();
+            for ci in 0..n_cov {
+                log_pen += log_table[[i, design.global_level(ci, j)]];
             }
-            cross += rij * sigma[i] * log_pen;
+            cross += rij * sigma_i * log_pen;
         }
     }
 
@@ -558,6 +567,76 @@ mod tests {
                 let diff = (fast[[i, j]] - slow[[i, j]]).abs();
                 assert!(diff < 1e-12, "centroid mismatch at [{i},{j}]: {diff}");
             }
+        }
+    }
+
+    /// Previous objective: `ln` and a dense Φ scan per assignment.
+    fn reference_objective(
+        r: ArrayView2<'_, f64>,
+        dist: ArrayView2<'_, f64>,
+        o: ArrayView2<'_, f64>,
+        e: ArrayView2<'_, f64>,
+        phi: ArrayView2<'_, f64>,
+        theta: &[f64],
+        sigma: &Array1<f64>,
+    ) -> f64 {
+        let n = r.ncols() as f64;
+        let k = r.nrows();
+        let b = phi.nrows();
+        let norm = 2000.0 / n;
+        let mut kmeans_error = 0.0;
+        let mut entropy = 0.0;
+        let mut cross = 0.0;
+        for i in 0..k {
+            for j in 0..r.ncols() {
+                let rij = r[[i, j]];
+                kmeans_error += rij * dist[[i, j]];
+                if rij > 0.0 {
+                    entropy += rij * rij.ln() * sigma[i];
+                }
+                let mut log_pen = 0.0;
+                for bb in 0..b {
+                    if phi[[bb, j]] == 0.0 {
+                        continue;
+                    }
+                    let ratio = (o[[i, bb]] + e[[i, bb]] + 1.0) / (2.0 * e[[i, bb]] + 1.0);
+                    log_pen += theta[bb] * ratio.ln();
+                }
+                cross += rij * sigma[i] * log_pen;
+            }
+        }
+        (kmeans_error + entropy + cross) * norm
+    }
+
+    #[test]
+    fn objective_log_table_matches_dense_phi_scan() {
+        for n_cov in [1usize, 2] {
+            let (r, z, sigma, design, theta) = tiny_state(n_cov);
+            let y = kmeans_cosine(z.view(), r.nrows(), &mut ChaCha8Rng::seed_from_u64(9), 2);
+            let (r, dist) = init_r(y.view(), z.view(), &sigma);
+            let (o, e) = observed_expected(r.view(), design.phi.view(), &design.pr_b);
+            let fast = objective(
+                r.view(),
+                dist.view(),
+                o.view(),
+                e.view(),
+                &design,
+                &theta,
+                &sigma,
+            );
+            let slow = reference_objective(
+                r.view(),
+                dist.view(),
+                o.view(),
+                e.view(),
+                design.phi.view(),
+                &theta,
+                &sigma,
+            );
+            assert!(
+                (fast - slow).abs() < 1e-9 * slow.abs().max(1.0),
+                "n_cov={n_cov}: fast={fast} slow={slow}"
+            );
         }
     }
 }

@@ -87,7 +87,7 @@ cargo run -p harmorust --release -- compare --cells 500,2000,8000 --repeats 7 --
 cargo run -p harmorust --release -- compare --nclust 5
 ```
 
-On a 4-core Xeon against Harmony 2.0.5, default `nclust` was **1.21×** and `nclust=5` was **2.04×**. Full tables are in [PARITY.md](PARITY.md).
+On a 4-core Xeon against Harmony 2.0.5, default `nclust` was **1.56×** and `nclust=5` was **2.58×**. Full tables are in [PARITY.md](PARITY.md).
 
 # JSON in, JSON out (cells × PCs + batch labels)
 cargo run -p harmorust -- run < request.json
