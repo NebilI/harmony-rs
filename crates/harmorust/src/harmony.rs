@@ -168,7 +168,7 @@ impl HarmonyState {
             self.dist.view(),
             self.o.view(),
             self.e.view(),
-            self.design.phi.view(),
+            &self.design,
             &self.theta,
             &self.sigma,
         )
