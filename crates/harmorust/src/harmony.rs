@@ -3,7 +3,7 @@ use crate::config::HarmonyConfig;
 use crate::correct::{default_lambda, moe_correct_ridge};
 use crate::design::{encode_covariates, encode_labels, expand_lambda, expand_theta, Design};
 use crate::error::{HarmonyError, Result};
-use crate::linalg::l2_normalize_columns;
+use crate::linalg::{l2_normalize_columns, softmax_neg_dist};
 use ndarray::{Array1, Array2, ArrayView2};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -187,15 +187,18 @@ impl HarmonyState {
             self.e = e;
         }
 
+        // Distances are fixed for this clustering round, so the distance-only
+        // softmax is reused across inner `update_r` passes instead of calling
+        // `exp` once per cell per pass.
+        let r_base = softmax_neg_dist(self.dist.view(), self.sigma.view());
         let mut used = 0usize;
         for iter in 0..self.config.max_iter_cluster {
             used = iter + 1;
             update_r(
                 &mut self.r,
-                &self.dist,
+                r_base.view(),
                 &self.design,
                 &self.theta,
-                &self.sigma,
                 &mut self.o,
                 &mut self.e,
                 self.config.block_size,
