@@ -52,6 +52,7 @@ Compare against CRAN `harmony` (the original C++ kernel) on the same synthetic a
 # requires R and install.packages("harmony")
 cargo run -p harmorust --release -- compare
 ./scripts/compare.sh --nclust 5 --repeats 7
+./scripts/compare.sh --nclust 20
 ```
 
 Both kernels get the same embeddings and hyperparameters (`max_iter = 8`, early stopping off, `lambda = 1`, 20 PCs, 4 batches). Times are **median wall time** after 2 warmup runs and 5 measured repeats. **Speedup** is original / harmorust (>1 means harmorust is faster).
@@ -71,6 +72,20 @@ This is Harmony's usual workload (many soft clusters, one ridge fit each).
 | atlas-8000 | 8000 | 20 | 100 | 1.15 s | 804.0 ms | 1.44× |
 
 Geometric-mean speedup: **1.78×** (was 1.56× after the objective table). At 8k cells harmorust went 877.5 ms → 804.0 ms.
+
+### Medium `nclust = 20`
+
+Same cell-count list with soft clusters fixed at 20 — between the biology-matched small-K case and Harmony's default.
+
+| Case | Cells | PCs | Clusters | Original Harmony | harmorust | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| atlas-500 | 500 | 20 | 20 | 18.4 ms | 8.36 ms | 2.20× |
+| atlas-1000 | 1000 | 20 | 20 | 31.1 ms | 15.6 ms | 2.00× |
+| atlas-2000 | 2000 | 20 | 20 | 57.9 ms | 36.2 ms | 1.60× |
+| atlas-4000 | 4000 | 20 | 20 | 117.6 ms | 65.0 ms | 1.81× |
+| atlas-8000 | 8000 | 20 | 20 | 252.5 ms | 134.7 ms | 1.87× |
+
+Geometric-mean speedup: **1.89×**. Reproducible with `./scripts/compare.sh --nclust 20`.
 
 ### Small `nclust = 5` (matched to planted cell types)
 
