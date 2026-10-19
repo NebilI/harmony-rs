@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Harmony hyperparameters, matching the R `RunHarmony` / `harmony_options` API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct HarmonyConfig {
     /// Diversity penalty per covariate. Default 2. `0` does not encourage mixing.
     pub theta: f64,

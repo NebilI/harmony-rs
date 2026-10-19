@@ -10,7 +10,8 @@ Description: Rust reimplementation of the Harmony integration loop
 License: MIT + file LICENSE
 Encoding: UTF-8
 Depends: R (>= 4.2)
-Imports: methods, Matrix
-Suggests: Seurat (>= 4.1.1), seurust, testthat
-SystemRequirements: Cargo (Rust's package manager), rustc >= 1.81
+Imports: methods, Matrix, jsonlite, stats
+Suggests: Seurat (>= 4.1.1), SingleCellExperiment, ggplot2, seurust, testthat
+SystemRequirements: Cargo (Rust's package manager), rustc >= 1.81; the
+    harmorust CLI binary on PATH or HARMORUST_BIN
 RoxygenNote: 7.3.2
