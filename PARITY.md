@@ -62,7 +62,17 @@ A future `tests/testthat/test_rust_harmony.R` should compare `harmony::RunHarmon
 # requires R and install.packages("harmony")
 cargo run -p harmorust --release -- parity
 ./scripts/parity.sh --cells 200,500,1000 --nclust 1,5
+# pull-request gate (fails if a gated max |Δ| exceeds 1e-4)
+cargo run -p harmorust --release -- parity --check
 ```
+
+## Pull-request gate
+
+Every pull request must keep gated `|harmorust − Harmony|` at or below `PARITY_MAX_ABS` (`1e-4`). That is four orders below a divergent k-means++ (`0.1`–`2`) and still above the C++ `float` type gap (`~3e-5`). `1e-6` is the long-term target after the ridge matches OpenBLAS float GEMM.
+
+CI installs CRAN harmony and runs `cargo test --workspace` with `HARMORUST_REQUIRE_PARITY=1` plus `harmorust parity --check --cells 200,500 --nclust 1,5`. Local `cargo test` still skips the live Harmony cases when the R package is missing; the gate unit tests (a fake `1.8` fails, a `3e-5` type gap passes) always run.
+
+Gated fields: `embeddings`, `R`, `Y`, `O`, `moe_correct_ridge`. Skipped: `objective` (it accumulates inner rounds) and end-to-end `embeddings` / `R` / `Y` / `O` when `nclust > 1` and `N < 400` until Armadillo Lloyd matches. Ridge on Harmony’s final `R` stays gated on those small multi-cluster cases.
 
 Both sides see the same embeddings and hyperparameters (`max_iter = 8`, early stopping off, `lambda = 1`, 20 PCs, 4 batches). Harmony 2.0.5 stores the C++ loop in `float`. harmorust now quantizes `Z` to `float`, runs softmax (`expf(-dist/σ)`) and the ridge apply in `float`, and uses Harmony's k-means++ plus R's `set.seed` / `runif` stream so init lands on the same cells. Soft-assignment matrices `R`, `Y`, and `O` are compared after aligning clusters on `Y`. `moe_correct_ridge` is harmorust's ridge applied to Harmony's final `R`, compared to Harmony's `Z_corr`.
 

@@ -312,7 +312,7 @@ mod tests {
     use crate::design::encode_labels;
     use crate::linalg::column_l1_normalize;
     use ndarray::{Array2, ArrayView2};
-    use rand::{Rng, SeedableRng}
+    use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
     /// Previous per-cell `exp` / `pow` loop. Kept to prove the table-based

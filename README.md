@@ -95,6 +95,9 @@ cargo run -p harmorust --release -- compare
 
 # numerical |harmorust − original| (min / max abs diff, scientific notation)
 cargo run -p harmorust --release -- parity
+
+# PR gate: fail if a gated max |Δ| exceeds 1e-4
+cargo run -p harmorust --release -- parity --check
 ```
 
 `compare` builds a synthetic atlas at several cell counts, runs both kernels with the same hyperparameters (`max_iter=8`, early stopping off, Harmony's default `nclust`), and prints median wall time plus a speedup column (`original / harmorust`). Repeat it whenever you want fresh numbers:
@@ -136,6 +139,10 @@ Compared fields: corrected `embeddings`, cluster-aligned `R` / `Y` / `O`, the ou
 | atlas-1000 | embeddings | 1.4901e-08 | 1.7810e-04 |
 
 The remaining `3e-02` on the 200-cell / 5-cluster case is Armadillo Lloyd + block shuffle, not the ridge. Full tables, including aligned `R` / `Y` / `O`, are in [PARITY.md](PARITY.md).
+
+### Pull-request gate
+
+PRs fail CI if a gated field’s max `|Δ|` exceeds `1e-4` (`PARITY_MAX_ABS` in `parity.rs`). That rejects O(1) clustering drift while allowing the remaining C++ `float` residual. Unit tests of the gate always run; the live Harmony comparison runs in CI (and locally when CRAN harmony is installed). `HARMORUST_REQUIRE_PARITY=1` makes a missing Harmony install a test failure instead of a skip.
 
 ```sh
 # JSON in, JSON out (cells × PCs + batch labels)
