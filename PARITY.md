@@ -171,7 +171,7 @@ Geometric-mean speedup: **2.86×**.
 
 ### This machine, after vectorized `exp`/`ln` (glibc libmvec via C)
 
-Same protocol after softmax / objective entropy call glibc libmvec over contiguous `K × N` rows (AVX-512 8-wide when present, else AVX2). That landing needed a C shim because stable Rust cannot pass SIMD types through FFI. **This-change** speedup is harmorust-before / harmorust-after on this box. The next section replaces the C shim with a Rust `std::arch` polynomial (rustc ≥ 1.89).
+Same protocol after softmax / objective entropy call glibc libmvec over contiguous `K × N` rows (AVX-512 8-wide when present, else AVX2). That landing needed a C shim because stable Rust cannot pass SIMD types through FFI. **This-change** speedup is harmorust-before / harmorust-after on this box. The next section replaces the C shim with a Rust `std::arch` polynomial (rustc ≥ 1.89) and remeasures.
 
 Default `nclust` geo-mean vs original: **1.68× → 1.99×**. At 8k cells harmorust went **778.2 ms → 692.7 ms** (1.12× on our side).
 
@@ -212,6 +212,50 @@ First 5-repeat pass had a noisy 4k-cell rust median (33.5 ms). The table below i
 | atlas-8000 | 8000 | 20 | 5 | 88.8 ms | 31.8 ms | 2.80× | 1.13× |
 
 Geometric-mean vs original: **3.26×**. Geometric-mean vs this-machine before: **1.16×**.
+
+### This machine, after `std::arch` exp/ln (rustc 1.89)
+
+Same protocol after dropping the C shim. Softmax / objective entropy use a Rust `std::arch` AVX-512 (else AVX2+FMA) Cephes/fdlibm polynomial over contiguous `K × N` rows. **This-change** is still harmorust-before (scalar) / harmorust-after. Versus the libmvec landing the kernel is a few percent slower.
+
+Default `nclust` geo-mean vs original: **1.68× → 1.94×**. At 8k cells harmorust went **778.2 ms → 738.5 ms** (1.05× on our side; libmvec was 692.7 ms).
+
+#### Default `nclust` after `std::arch`
+
+| Case | Cells | PCs | Clusters | Original Harmony | harmorust | vs original | vs this-machine before | vs libmvec |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| atlas-500 | 500 | 20 | 17 | 16.0 ms | 5.74 ms | 2.79× | 1.21× | 0.96× |
+| atlas-1000 | 1000 | 20 | 33 | 46.0 ms | 20.5 ms | 2.24× | 1.22× | 1.02× |
+| atlas-2000 | 2000 | 20 | 67 | 165.0 ms | 90.7 ms | 1.82× | 1.20× | 0.98× |
+| atlas-4000 | 4000 | 20 | 100 | 501.9 ms | 307.8 ms | 1.63× | 1.07× | 0.93× |
+| atlas-8000 | 8000 | 20 | 100 | 1.09 s | 738.5 ms | 1.48× | 1.05× | 0.94× |
+
+Geometric-mean vs original: **1.94×**. Geometric-mean vs this-machine before: **1.15×**. Geometric-mean vs libmvec: **0.97×**.
+
+#### Medium `nclust = 20` after `std::arch`
+
+| Case | Cells | PCs | Clusters | Original Harmony | harmorust | vs original | vs this-machine before | vs libmvec |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| atlas-500 | 500 | 20 | 20 | 17.4 ms | 6.90 ms | 2.52× | 1.14× | 1.01× |
+| atlas-1000 | 1000 | 20 | 20 | 30.7 ms | 14.0 ms | 2.19× | 1.14× | 0.99× |
+| atlas-2000 | 2000 | 20 | 20 | 57.1 ms | 25.9 ms | 2.21× | 1.17× | 1.00× |
+| atlas-4000 | 4000 | 20 | 20 | 113.3 ms | 54.1 ms | 2.09× | 1.14× | 0.96× |
+| atlas-8000 | 8000 | 20 | 20 | 232.5 ms | 121.9 ms | 1.91× | 1.10× | 0.95× |
+
+Geometric-mean vs original: **2.17×**. Geometric-mean vs this-machine before: **1.14×**. Geometric-mean vs libmvec: **0.98×**.
+
+#### Small `nclust = 5` after `std::arch`
+
+5-repeat medians were stable this pass (4k MAD 0.30 ms), so no 7-repeat re-run.
+
+| Case | Cells | PCs | Clusters | Original Harmony | harmorust | vs original | vs this-machine before | vs libmvec |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| atlas-500 | 500 | 20 | 5 | 8.27 ms | 2.02 ms | 4.08× | 1.10× | 0.95× |
+| atlas-1000 | 1000 | 20 | 5 | 13.4 ms | 4.09 ms | 3.27× | 1.12× | 0.97× |
+| atlas-2000 | 2000 | 20 | 5 | 23.9 ms | 8.01 ms | 2.98× | 1.11× | 0.91× |
+| atlas-4000 | 4000 | 20 | 5 | 45.0 ms | 17.0 ms | 2.65× | 1.14× | 1.02× |
+| atlas-8000 | 8000 | 20 | 5 | 89.1 ms | 31.5 ms | 2.82× | 1.14× | 1.01× |
+
+Geometric-mean vs original: **3.12×**. Geometric-mean vs this-machine before: **1.12×**. Geometric-mean vs libmvec: **0.97×**.
 
 ### Published tables (previous campaign machine, before this change)
 

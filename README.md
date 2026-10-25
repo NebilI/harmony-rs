@@ -105,7 +105,7 @@ cargo run -p harmorust --release -- compare --nclust 5
 cargo run -p harmorust --release -- compare --nclust 20
 ```
 
-On a 4-core Xeon against Harmony 2.0.5, after vectorized `exp`/`ln`, default `nclust` was **1.99×**, `nclust=20` was **2.23×**, and `nclust=5` was **3.26×**. That change itself was about **1.19× / 1.16× / 1.16×** on harmorust versus the same machine immediately before. Full tables are in [PARITY.md](PARITY.md).
+On a 4-core Xeon against Harmony 2.0.5, after the Rust `std::arch` `exp`/`ln` (rustc ≥ 1.89), default `nclust` was **1.94×**, `nclust=20` was **2.17×**, and `nclust=5` was **3.12×**. Versus the scalar kernel on this machine that is **1.15× / 1.14× / 1.12×**. The earlier libmvec C landing was a few percent faster (1.99× / 2.23× / 3.26× vs original). Full tables are in [PARITY.md](PARITY.md).
 
 ### Numerical difference (`float` vs `f64`)
 
