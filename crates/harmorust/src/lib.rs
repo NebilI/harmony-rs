@@ -27,6 +27,7 @@ pub mod linalg;
 pub mod metrics;
 mod vectormath;
 pub mod parity;
+mod r_rng;
 pub mod simulate;
 
 pub use config::HarmonyConfig;

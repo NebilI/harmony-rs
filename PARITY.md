@@ -45,8 +45,8 @@ obj <- harmorust::RunHarmony(obj, group.by.vars = "donor")
 
 ## Not bit-identical (yet)
 
-- Harmony C++ defaults to `float`; we use `f64`.
-- k-means++ uses the same sampling idea but not Armadillo's `arma::kmeans`.
+- Harmony C++ defaults to `float`; we quantize `Z` and run softmax / ridge apply in `float`, but the small ridge invert is still `f64`.
+- k-means++ matches Harmony's `initialize_centroids` and R's `runif` stream. Lloyd is Euclidean like `arma::kmeans`, not bit-identical to Armadillo.
 - Block shuffles are seeded independently of R's `.Random.seed`.
 - `ncores` maps to Rayon, not OpenMP / OpenBLAS (`RhpcBLASctl`).
 - `return_object` is a harmorust list with Harmony field names, not the Rcpp C++ module (no live `cluster_cpp` / `moe_correct_ridge_cpp` methods).
@@ -54,7 +54,7 @@ obj <- harmorust::RunHarmony(obj, group.by.vars = "donor")
 
 A future `tests/testthat/test_rust_harmony.R` should compare `harmony::RunHarmony(...)` to `harmorust::RunHarmony` the way seurust compares `LogNorm`.
 
-## Numerical difference (C++ `float` vs Rust `f64`)
+## Numerical difference (C++ `float` vs harmorust)
 
 `compare` only times the two kernels. `parity` runs them once on the same synthetic atlas and reports the element-wise absolute difference of each result, with **min** and **max** in scientific notation.
 
@@ -64,55 +64,51 @@ cargo run -p harmorust --release -- parity
 ./scripts/parity.sh --cells 200,500,1000 --nclust 1,5
 ```
 
-Both sides see the same embeddings and hyperparameters (`max_iter = 8`, early stopping off, `lambda = 1`, 20 PCs, 4 batches). Harmony 2.0.5 stores the C++ loop in `float`; harmorust uses `f64`. Soft-assignment matrices `R`, `Y`, and `O` are compared after aligning clusters on `Y` (k-means++ can permute labels). `moe_correct_ridge` is harmorust's ridge applied to Harmony's final `R`, compared to Harmony's `Z_corr` — that isolates the correction from clustering.
+Both sides see the same embeddings and hyperparameters (`max_iter = 8`, early stopping off, `lambda = 1`, 20 PCs, 4 batches). Harmony 2.0.5 stores the C++ loop in `float`. harmorust now quantizes `Z` to `float`, runs softmax (`expf(-dist/σ)`) and the ridge apply in `float`, and uses Harmony's k-means++ plus R's `set.seed` / `runif` stream so init lands on the same cells. Soft-assignment matrices `R`, `Y`, and `O` are compared after aligning clusters on `Y`. `moe_correct_ridge` is harmorust's ridge applied to Harmony's final `R`, compared to Harmony's `Z_corr`.
 
-`nclust = 1` is ordinary ridge (no clustering ambiguity), so those rows are the cleanest float-vs-f64 signal. Larger `nclust` also includes independent k-means++ seeding and block shuffles, so max `|Δ|` can jump from machine-epsilon-for-float (~1e-7) to O(1).
+`nclust = 1` is ordinary ridge (no clustering ambiguity). Some embedding entries now match exactly (`min |Δ| = 0`). Max stays around `3e-05` from float GEMM vs our index-walk ridge. `nclust = 5` on 200 cells used to be O(1) from a different k-means++; matching Harmony's init cut that to `~3e-02`. The leftover is Armadillo's Euclidean `kmeans` + block shuffle, not the ridge (`moe_correct_ridge` max is `9.8e-06` on that case).
 
-Measured on this machine against Harmony 2.0.5 / harmorust 0.1.0 (`ncores=4`). Re-ran `./scripts/parity.sh --cells 200,500,1000 --nclust 1,5 --ncores 4` after the `std::arch` `exp`/`ln` (rustc 1.89, same seed and protocol). Printed min / max `|Δ|` are unchanged from the tables below.
+Measured on this machine against Harmony 2.0.5 / harmorust 0.1.0 (`ncores=4`), after matching Harmony's `float` path and k-means++.
 
 ### `nclust = 1` (ridge only)
 
-One soft cluster, so k-means++ cannot permute labels. Embedding `|Δ|` stays in the float-ulp range (min ~1e-10, max ~3e-5). `R` and `O` match to 0 or ~1e-16. The objective is a sum, so small per-cell errors accumulate.
-
 | Case | Field | Elements | min \|Δ\| | max \|Δ\| |
 | --- | --- | ---: | ---: | ---: |
-| atlas-200 | embeddings | 4000 | 4.9781e-09 | 5.3873e-06 |
+| atlas-200 | embeddings | 4000 | 0.0000e+00 | 5.2899e-06 |
 | atlas-200 | R | 200 | 0.0000e+00 | 1.1102e-16 |
-| atlas-200 | Y | 20 | 9.8149e-08 | 5.4073e-06 |
+| atlas-200 | Y | 20 | 9.8720e-08 | 5.4240e-06 |
 | atlas-200 | O | 4 | 0.0000e+00 | 0.0000e+00 |
-| atlas-200 | moe_correct_ridge | 4000 | 3.3742e-08 | 5.2837e-06 |
-| atlas-500 | embeddings | 10000 | 2.8591e-09 | 3.0002e-05 |
+| atlas-200 | moe_correct_ridge | 4000 | 0.0000e+00 | 5.2899e-06 |
+| atlas-500 | embeddings | 10000 | 0.0000e+00 | 2.9922e-05 |
 | atlas-500 | R | 500 | 0.0000e+00 | 1.1102e-16 |
-| atlas-500 | Y | 20 | 1.4428e-07 | 5.2817e-05 |
+| atlas-500 | Y | 20 | 1.4249e-07 | 5.2821e-05 |
 | atlas-500 | O | 4 | 0.0000e+00 | 0.0000e+00 |
-| atlas-500 | moe_correct_ridge | 10000 | 2.1233e-09 | 2.9950e-05 |
-| atlas-1000 | embeddings | 20000 | 1.1650e-10 | 3.0109e-05 |
+| atlas-500 | moe_correct_ridge | 10000 | 0.0000e+00 | 2.9922e-05 |
+| atlas-1000 | embeddings | 20000 | 0.0000e+00 | 3.0100e-05 |
 | atlas-1000 | R | 1000 | 0.0000e+00 | 0.0000e+00 |
-| atlas-1000 | Y | 20 | 1.3447e-07 | 4.7914e-05 |
+| atlas-1000 | Y | 20 | 1.3597e-07 | 4.7922e-05 |
 | atlas-1000 | O | 4 | 0.0000e+00 | 0.0000e+00 |
-| atlas-1000 | moe_correct_ridge | 20000 | 6.2431e-09 | 3.0097e-05 |
+| atlas-1000 | moe_correct_ridge | 20000 | 0.0000e+00 | 3.0100e-05 |
 
 ### `nclust = 5` (full Harmony)
 
-Same atlas with five soft clusters. When k-means++ lands on the same partition (500 / 1000 cells) the corrected embeddings stay near float ulp. On the 200-cell atlas the partitions diverged (`R` max \|Δ\| ≈ 1), so end-to-end embeddings differ by O(1) — but `moe_correct_ridge` on Harmony's own `R` is still ~1e-5, which is the float-vs-f64 gap of the ridge itself.
-
 | Case | Field | Elements | min \|Δ\| | max \|Δ\| |
 | --- | --- | ---: | ---: | ---: |
-| atlas-200 | embeddings | 4000 | 2.2896e-05 | 1.8171e+00 |
-| atlas-200 | R (aligned) | 1000 | 3.3260e-18 | 9.9876e-01 |
-| atlas-200 | Y (aligned) | 100 | 1.7138e-05 | 2.5378e-01 |
-| atlas-200 | O (aligned) | 20 | 1.7079e-05 | 9.6200e+00 |
-| atlas-200 | moe_correct_ridge | 4000 | 1.7635e-10 | 9.5990e-06 |
-| atlas-500 | embeddings | 10000 | 2.5231e-12 | 3.9461e-05 |
-| atlas-500 | R (aligned) | 2500 | 1.5188e-20 | 3.2558e-06 |
-| atlas-500 | Y (aligned) | 100 | 1.0128e-09 | 3.8961e-06 |
-| atlas-500 | O (aligned) | 20 | 2.7621e-07 | 1.8340e-05 |
-| atlas-500 | moe_correct_ridge | 10000 | 9.9382e-11 | 4.1187e-05 |
-| atlas-1000 | embeddings | 20000 | 1.8192e-10 | 1.3783e-04 |
-| atlas-1000 | R (aligned) | 5000 | 1.9400e-20 | 1.7757e-06 |
-| atlas-1000 | Y (aligned) | 100 | 4.7780e-10 | 1.6509e-05 |
-| atlas-1000 | O (aligned) | 20 | 1.5460e-06 | 4.9945e-05 |
-| atlas-1000 | moe_correct_ridge | 20000 | 3.3771e-10 | 1.2222e-04 |
+| atlas-200 | embeddings | 4000 | 0.0000e+00 | 3.4487e-02 |
+| atlas-200 | R (aligned) | 1000 | 2.0872e-19 | 4.2022e-02 |
+| atlas-200 | Y (aligned) | 100 | 4.6566e-09 | 3.7675e-03 |
+| atlas-200 | O (aligned) | 20 | 6.1231e-07 | 1.7258e-01 |
+| atlas-200 | moe_correct_ridge | 4000 | 0.0000e+00 | 9.7752e-06 |
+| atlas-500 | embeddings | 10000 | 0.0000e+00 | 3.4332e-05 |
+| atlas-500 | R (aligned) | 2500 | 1.4383e-20 | 3.2561e-06 |
+| atlas-500 | Y (aligned) | 100 | 1.3970e-09 | 3.8743e-06 |
+| atlas-500 | O (aligned) | 20 | 2.7599e-07 | 1.8340e-05 |
+| atlas-500 | moe_correct_ridge | 10000 | 0.0000e+00 | 4.9591e-05 |
+| atlas-1000 | embeddings | 20000 | 1.4901e-08 | 1.7810e-04 |
+| atlas-1000 | R (aligned) | 5000 | 1.2869e-20 | 1.7757e-06 |
+| atlas-1000 | Y (aligned) | 100 | 9.3132e-10 | 1.6510e-05 |
+| atlas-1000 | O (aligned) | 20 | 1.5464e-06 | 4.9943e-05 |
+| atlas-1000 | moe_correct_ridge | 20000 | 0.0000e+00 | 1.6356e-04 |
 
 ## Speed
 

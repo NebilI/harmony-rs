@@ -1,22 +1,24 @@
 use crate::error::{HarmonyError, Result};
-use crate::vectormath::exp_slice;
 use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 pub fn l2_normalize_columns(z: ArrayView2<'_, f64>) -> Array2<f64> {
-    let mut out = z.to_owned();
+    // Harmony stores the loop in `float`; match that rounding.
+    let mut out = z.mapv(|v| v as f32);
     for mut col in out.columns_mut() {
         let norm = col.dot(&col).sqrt();
         if norm > 0.0 {
             col.mapv_inplace(|v| v / norm);
         }
     }
-    out
+    out.mapv(|v| f64::from(v))
 }
 
 pub fn cosine_distance(y: ArrayView2<'_, f64>, z: ArrayView2<'_, f64>) -> Array2<f64> {
-    // Y is d x K, Z is d x N. Dist = 2 (1 - Y^T Z)
-    let sim = y.t().dot(&z);
-    sim.mapv(|s| 2.0 * (1.0 - s))
+    // Y is d x K, Z is d x N. Dist = 2 (1 - Y^T Z), evaluated in float.
+    let y32 = y.mapv(|v| v as f32);
+    let z32 = z.mapv(|v| v as f32);
+    let sim = y32.t().dot(&z32);
+    sim.mapv(|s| f64::from(2.0 * (1.0 - s)))
 }
 
 pub fn column_l1_normalize(mut r: Array2<f64>) -> Array2<f64> {
@@ -130,51 +132,31 @@ pub fn invert_arrowhead(phi_cov: ArrayView2<'_, f64>) -> Result<Array2<f64>> {
 pub fn softmax_neg_dist(dist: ArrayView2<'_, f64>, sigma: ArrayView1<'_, f64>) -> Array2<f64> {
     let k = dist.nrows();
     let n = dist.ncols();
-    let mut r = Array2::<f64>::zeros((k, n));
     if n == 0 || k == 0 {
-        return r;
+        return Array2::<f64>::zeros((k, n));
     }
 
-    // Rows of the K×N distance matrix are contiguous. Walk cells that way so
-    // SIMD exp can cover a whole row after a per-cell max reduction.
-    let mut max_logit = vec![f64::NEG_INFINITY; n];
+    // Harmony C++: R = exp(-dist / σ) then L1-normalise columns, in float.
+    // Cosine distances stay in [0, 4], so expf does not overflow at σ=0.1.
+    let mut r32 = Array2::<f32>::zeros((k, n));
+    let mut sum = vec![0.0f32; n];
     for i in 0..k {
-        let inv_sigma = 1.0 / sigma[i];
+        let inv_sigma = 1.0f32 / (sigma[i] as f32);
         let drow = dist.row(i);
         for j in 0..n {
-            let logit = -drow[j] * inv_sigma;
-            if logit > max_logit[j] {
-                max_logit[j] = logit;
-            }
+            let v = (-(drow[j] as f32) * inv_sigma).exp();
+            r32[[i, j]] = v;
+            sum[j] += v;
         }
     }
-
-    let mut scratch = vec![0.0f64; n];
-    let mut sum = vec![0.0f64; n];
     for i in 0..k {
-        let inv_sigma = 1.0 / sigma[i];
-        let drow = dist.row(i);
-        for j in 0..n {
-            scratch[j] = -drow[j] * inv_sigma - max_logit[j];
-        }
-        let mut row = r.row_mut(i);
-        let rrow = row.as_slice_mut().expect("softmax row is contiguous");
-        exp_slice(rrow, &scratch);
-        for j in 0..n {
-            sum[j] += rrow[j];
-        }
-    }
-
-    for i in 0..k {
-        let mut row = r.row_mut(i);
-        let rrow = row.as_slice_mut().expect("softmax row is contiguous");
         for j in 0..n {
             if sum[j] > 0.0 {
-                rrow[j] /= sum[j];
+                r32[[i, j]] /= sum[j];
             }
         }
     }
-    r
+    r32.mapv(|v| f64::from(v))
 }
 
 pub fn safe_log(x: f64) -> f64 {
@@ -212,22 +194,16 @@ mod tests {
         let sigma = array![0.1, 0.2, 0.15];
         let got = softmax_neg_dist(dist.view(), sigma.view());
         for j in 0..dist.ncols() {
-            let mut max_logit = f64::NEG_INFINITY;
-            let mut logits = vec![0.0f64; dist.nrows()];
+            let mut sum = 0.0f32;
+            let mut vals = vec![0.0f32; dist.nrows()];
             for i in 0..dist.nrows() {
-                logits[i] = -dist[[i, j]] / sigma[i];
-                if logits[i] > max_logit {
-                    max_logit = logits[i];
-                }
-            }
-            let mut sum = 0.0;
-            for i in 0..dist.nrows() {
-                sum += (logits[i] - max_logit).exp();
+                vals[i] = (-(dist[[i, j]] as f32) / (sigma[i] as f32)).exp();
+                sum += vals[i];
             }
             for i in 0..dist.nrows() {
-                let want = (logits[i] - max_logit).exp() / sum;
+                let want = f64::from(vals[i] / sum);
                 let diff = (got[[i, j]] - want).abs();
-                assert!(diff < 1e-12, "softmax [{i},{j}] |Δ|={diff}");
+                assert!(diff < 1e-7, "softmax [{i},{j}] |Δ|={diff}");
             }
         }
     }

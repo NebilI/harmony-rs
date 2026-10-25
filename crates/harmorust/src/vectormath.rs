@@ -8,6 +8,7 @@
 //! nightly `simd_ffi`. This module is pure Rust.
 
 /// `dst[i] = exp(src[i])`.
+#[allow(dead_code)]
 pub fn exp_slice(dst: &mut [f64], src: &[f64]) {
     assert_eq!(dst.len(), src.len());
     let n = dst.len();
@@ -62,6 +63,7 @@ pub fn ln_nonpositive_zero(dst: &mut [f64], src: &[f64]) {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 mod x86 {
     use std::arch::x86_64::*;
 
