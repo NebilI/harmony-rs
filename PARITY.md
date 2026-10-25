@@ -6,9 +6,11 @@ harmorust reimplements the published Harmony2 loop, not a copy of the GPL-3 C++ 
 
 | Harmony | harmorust |
 | --- | --- |
-| `RunHarmony(matrix, meta, vars_use)` | `run_harmony` / `run_harmony_multi` |
+| `RunHarmony(matrix, meta, vars_use)` | `run_harmony` / `run_harmony_multi` + `r/harmorust` |
+| `RunHarmony.Seurat` | `RunHarmony.Seurat` |
+| `RunHarmony.SingleCellExperiment` | `RunHarmony.SingleCellExperiment` |
 | Embeddings returned cells × PCs | `HarmonyResult.embeddings` |
-| `theta`, `sigma`, `lambda`, `nclust`, `max_iter` | `HarmonyConfig` |
+| `theta`, `sigma`, `lambda`, `nclust`, `max_iter`, `early_stop`, `verbose` | same |
 | `harmony_options()` (`alpha`, `tau`, `block.size`, `epsilon.*`, `batch.prop.cutoff`) | same fields |
 | `lambda = NULL` automatic ridge | `lambda: None` → `α · E` |
 | `theta` scaled by `1 - exp(-(N_b / (K τ))²)` | `expand_theta` |
@@ -18,9 +20,16 @@ harmorust reimplements the published Harmony2 loop, not a copy of the GPL-3 C++ 
 | Arrowhead inverse when one covariate | `invert_arrowhead` |
 | Skip a batch in a cluster below `batch.prop.cutoff` | same |
 | Skip a covariate with only one qualifying level | same |
-| `return_object` fields `R`, `Y`, `O` | `HarmonyResult.{r,y,o}` |
+| `return_object` fields `R`, `Y`, `O`, objectives | `harmorust_harmony` list (`R`/`Y`/`O`/`objective_*`) |
+| `plot_convergence` / convergence plot | `HarmonyConvergencePlot()` |
+| Legacy arg rejection (`do_pca`, `max.iter.harmony`, …) | `.check_legacy_args` |
 | Seurat `group.by.vars`, `reduction.use`, `reduction.save` | `r/harmorust` |
 | Two or more covariates | stacked one-hot `Design` |
+| `ncores` | `RAYON_NUM_THREADS` for the Rust CLI child |
+
+Harmony 2.0.5 only **exports** `RunHarmony`, `harmony_options`, and `%>%`. harmorust matches those entry points (minus the dplyr pipe re-export) and also exports `HarmonyConvergencePlot` so `plot_convergence=TRUE` / `return_object=TRUE` workflows work without reaching into internals.
+
+The R package calls the `harmorust` CLI over JSON (`HARMORUST_BIN` or `PATH`). That is the current bind path; an extendr staticlib like seurust is still a possible later swap.
 
 seurust is **not** a Harmony implementation. It supplies the Seurat kernels that produce the PCA embedding Harmony consumes (`NormalizeData`, `ScaleData`, SNN). Compose them:
 
@@ -39,10 +48,11 @@ obj <- harmorust::RunHarmony(obj, group.by.vars = "donor")
 - Harmony C++ defaults to `float`; we use `f64`.
 - k-means++ uses the same sampling idea but not Armadillo's `arma::kmeans`.
 - Block shuffles are seeded independently of R's `.Random.seed`.
-- No OpenMP / OpenBLAS thread control (`ncores`); Rayon uses the crate default pool.
-- R / Seurat / SingleCellExperiment wrappers are API-complete in source; the extendr bind still needs `cargo` at install time, same as seurust.
+- `ncores` maps to Rayon, not OpenMP / OpenBLAS (`RhpcBLASctl`).
+- `return_object` is a harmorust list with Harmony field names, not the Rcpp C++ module (no live `cluster_cpp` / `moe_correct_ridge_cpp` methods).
+- No `%>%` re-export from dplyr.
 
-A future `tests/testthat/test_rust_harmony.R` should compare `harmony::RunHarmony(..., seed=…)` to `harmorust::RunHarmony` the way seurust compares `LogNorm`. That needs R + the CRAN Harmony package on the machine.
+A future `tests/testthat/test_rust_harmony.R` should compare `harmony::RunHarmony(...)` to `harmorust::RunHarmony` the way seurust compares `LogNorm`.
 
 ## Speed
 
