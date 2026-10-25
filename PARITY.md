@@ -68,9 +68,51 @@ Both sides see the same embeddings and hyperparameters (`max_iter = 8`, early st
 
 `nclust = 1` is ordinary ridge (no clustering ambiguity), so those rows are the cleanest float-vs-f64 signal. Larger `nclust` also includes independent k-means++ seeding and block shuffles, so max `|Δ|` can jump from machine-epsilon-for-float (~1e-7) to O(1).
 
-Measured on this machine against Harmony 2.0.5 / harmorust 0.1.0. Re-run `./scripts/parity.sh` to refresh the table.
+Measured on this machine against Harmony 2.0.5 / harmorust 0.1.0 (`ncores=4`). Re-run `./scripts/parity.sh` to refresh the table.
 
-<!-- PARITY_NUMERICAL_TABLE -->
+### `nclust = 1` (ridge only)
+
+One soft cluster, so k-means++ cannot permute labels. Embedding `|Δ|` stays in the float-ulp range (min ~1e-10, max ~3e-5). `R` and `O` match to 0 or ~1e-16. The objective is a sum, so small per-cell errors accumulate.
+
+| Case | Field | Elements | min \|Δ\| | max \|Δ\| |
+| --- | --- | ---: | ---: | ---: |
+| atlas-200 | embeddings | 4000 | 4.9781e-09 | 5.3873e-06 |
+| atlas-200 | R | 200 | 0.0000e+00 | 1.1102e-16 |
+| atlas-200 | Y | 20 | 9.8149e-08 | 5.4073e-06 |
+| atlas-200 | O | 4 | 0.0000e+00 | 0.0000e+00 |
+| atlas-200 | moe_correct_ridge | 4000 | 3.3742e-08 | 5.2837e-06 |
+| atlas-500 | embeddings | 10000 | 2.8591e-09 | 3.0002e-05 |
+| atlas-500 | R | 500 | 0.0000e+00 | 1.1102e-16 |
+| atlas-500 | Y | 20 | 1.4428e-07 | 5.2817e-05 |
+| atlas-500 | O | 4 | 0.0000e+00 | 0.0000e+00 |
+| atlas-500 | moe_correct_ridge | 10000 | 2.1233e-09 | 2.9950e-05 |
+| atlas-1000 | embeddings | 20000 | 1.1650e-10 | 3.0109e-05 |
+| atlas-1000 | R | 1000 | 0.0000e+00 | 0.0000e+00 |
+| atlas-1000 | Y | 20 | 1.3447e-07 | 4.7914e-05 |
+| atlas-1000 | O | 4 | 0.0000e+00 | 0.0000e+00 |
+| atlas-1000 | moe_correct_ridge | 20000 | 6.2431e-09 | 3.0097e-05 |
+
+### `nclust = 5` (full Harmony)
+
+Same atlas with five soft clusters. When k-means++ lands on the same partition (500 / 1000 cells) the corrected embeddings stay near float ulp. On the 200-cell atlas the partitions diverged (`R` max \|Δ\| ≈ 1), so end-to-end embeddings differ by O(1) — but `moe_correct_ridge` on Harmony's own `R` is still ~1e-5, which is the float-vs-f64 gap of the ridge itself.
+
+| Case | Field | Elements | min \|Δ\| | max \|Δ\| |
+| --- | --- | ---: | ---: | ---: |
+| atlas-200 | embeddings | 4000 | 2.2896e-05 | 1.8171e+00 |
+| atlas-200 | R (aligned) | 1000 | 3.3260e-18 | 9.9876e-01 |
+| atlas-200 | Y (aligned) | 100 | 1.7138e-05 | 2.5378e-01 |
+| atlas-200 | O (aligned) | 20 | 1.7079e-05 | 9.6200e+00 |
+| atlas-200 | moe_correct_ridge | 4000 | 1.7635e-10 | 9.5990e-06 |
+| atlas-500 | embeddings | 10000 | 2.5231e-12 | 3.9461e-05 |
+| atlas-500 | R (aligned) | 2500 | 1.5188e-20 | 3.2558e-06 |
+| atlas-500 | Y (aligned) | 100 | 1.0128e-09 | 3.8961e-06 |
+| atlas-500 | O (aligned) | 20 | 2.7621e-07 | 1.8340e-05 |
+| atlas-500 | moe_correct_ridge | 10000 | 9.9382e-11 | 4.1187e-05 |
+| atlas-1000 | embeddings | 20000 | 1.8192e-10 | 1.3783e-04 |
+| atlas-1000 | R (aligned) | 5000 | 1.9400e-20 | 1.7757e-06 |
+| atlas-1000 | Y (aligned) | 100 | 4.7780e-10 | 1.6509e-05 |
+| atlas-1000 | O (aligned) | 20 | 1.5460e-06 | 4.9945e-05 |
+| atlas-1000 | moe_correct_ridge | 20000 | 3.3771e-10 | 1.2222e-04 |
 
 ## Speed
 
