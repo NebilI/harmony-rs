@@ -1,4 +1,7 @@
 use harmorust::compare::{print_report, run_compare, CompareOptions, CompareProtocol};
+use harmorust::parity::{
+    print_report as print_parity_report, run_parity, ParityOptions, ParityProtocol,
+};
 use harmorust::{
     embeddings_from_rows, evaluate, run_harmony, run_harmony_multi, simulate_atlas, HarmonyConfig,
     HarmonyResult, SimulateSpec,
@@ -206,6 +209,55 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let report = run_compare(&protocol, &opts)?;
             print_report(&report, json);
         }
+        "parity" => {
+            let mut protocol = ParityProtocol::default();
+            let mut opts = ParityOptions::default();
+            let mut json = false;
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--cells" => {
+                        protocol.compare.cell_counts =
+                            parse_usize_list(&args.next().ok_or("missing --cells")?)?
+                    }
+                    "--pcs" => {
+                        protocol.compare.n_pcs = args.next().ok_or("missing --pcs")?.parse()?
+                    }
+                    "--batches" => {
+                        protocol.compare.n_batches =
+                            args.next().ok_or("missing --batches")?.parse()?
+                    }
+                    "--types" => {
+                        protocol.compare.n_types = args.next().ok_or("missing --types")?.parse()?
+                    }
+                    "--max-iter" => {
+                        protocol.compare.max_iter =
+                            args.next().ok_or("missing --max-iter")?.parse()?
+                    }
+                    "--ncores" => {
+                        protocol.compare.ncores = args.next().ok_or("missing --ncores")?.parse()?
+                    }
+                    "--nclust" => {
+                        protocol.nclusts =
+                            parse_nclust_list(&args.next().ok_or("missing --nclust")?)?
+                    }
+                    "--seed" => {
+                        protocol.compare.seed = args.next().ok_or("missing --seed")?.parse()?
+                    }
+                    "--rscript" => {
+                        opts.rscript = args.next().ok_or("missing --rscript")?.into();
+                    }
+                    "--json" => json = true,
+                    "--early-stop" => protocol.compare.early_stop = true,
+                    other => return Err(format!("unknown flag {other}").into()),
+                }
+            }
+            std::env::set_var(
+                "RAYON_NUM_THREADS",
+                protocol.compare.ncores.max(1).to_string(),
+            );
+            let report = run_parity(&protocol, &opts)?;
+            print_parity_report(&report, json);
+        }
         _ => {
             eprintln!("harmorust — Rust Harmony (seurust-style kernel port)\n");
             eprintln!("Usage:");
@@ -213,9 +265,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("  harmorust demo [--cells N] [--batch-strength S] [--seed SEED]");
             eprintln!("  harmorust bench [--cells N]");
             eprintln!("  harmorust compare [--cells N,N,...] [--warmup W] [--repeats R] [--ncores N]");
+            eprintln!("  harmorust parity [--cells N,N,...] [--nclust K,K,...] [--json]");
         }
     }
     Ok(())
+}
+
+fn parse_nclust_list(raw: &str) -> Result<Vec<Option<usize>>, Box<dyn std::error::Error>> {
+    let mut out = Vec::new();
+    for part in raw.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if part == "auto" {
+            out.push(None);
+        } else {
+            out.push(Some(part.parse()?));
+        }
+    }
+    if out.is_empty() {
+        return Err("need at least one nclust setting".into());
+    }
+    Ok(out)
 }
 
 fn parse_usize_list(raw: &str) -> Result<Vec<usize>, Box<dyn std::error::Error>> {

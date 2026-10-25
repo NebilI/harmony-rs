@@ -54,6 +54,24 @@ obj <- harmorust::RunHarmony(obj, group.by.vars = "donor")
 
 A future `tests/testthat/test_rust_harmony.R` should compare `harmony::RunHarmony(...)` to `harmorust::RunHarmony` the way seurust compares `LogNorm`.
 
+## Numerical difference (C++ `float` vs Rust `f64`)
+
+`compare` only times the two kernels. `parity` runs them once on the same synthetic atlas and reports the element-wise absolute difference of each result, with **min** and **max** in scientific notation.
+
+```sh
+# requires R and install.packages("harmony")
+cargo run -p harmorust --release -- parity
+./scripts/parity.sh --cells 200,500,1000 --nclust 1,5
+```
+
+Both sides see the same embeddings and hyperparameters (`max_iter = 8`, early stopping off, `lambda = 1`, 20 PCs, 4 batches). Harmony 2.0.5 stores the C++ loop in `float`; harmorust uses `f64`. Soft-assignment matrices `R`, `Y`, and `O` are compared after aligning clusters on `Y` (k-means++ can permute labels). `moe_correct_ridge` is harmorust's ridge applied to Harmony's final `R`, compared to Harmony's `Z_corr` — that isolates the correction from clustering.
+
+`nclust = 1` is ordinary ridge (no clustering ambiguity), so those rows are the cleanest float-vs-f64 signal. Larger `nclust` also includes independent k-means++ seeding and block shuffles, so max `|Δ|` can jump from machine-epsilon-for-float (~1e-7) to O(1).
+
+Measured on this machine against Harmony 2.0.5 / harmorust 0.1.0. Re-run `./scripts/parity.sh` to refresh the table.
+
+<!-- PARITY_NUMERICAL_TABLE -->
+
 ## Speed
 
 Compare against CRAN `harmony` (the original C++ kernel) on the same synthetic atlas:

@@ -92,6 +92,9 @@ cargo run -p harmorust --release -- bench --cells 4000
 
 # harmorust vs immunogenomics/harmony C++ (needs R + CRAN harmony)
 cargo run -p harmorust --release -- compare
+
+# numerical |harmorust − original| (min / max abs diff, scientific notation)
+cargo run -p harmorust --release -- parity
 ```
 
 `compare` builds a synthetic atlas at several cell counts, runs both kernels with the same hyperparameters (`max_iter=8`, early stopping off, Harmony's default `nclust`), and prints median wall time plus a speedup column (`original / harmorust`). Repeat it whenever you want fresh numbers:
@@ -103,6 +106,13 @@ cargo run -p harmorust --release -- compare --nclust 20
 ```
 
 On a 4-core Xeon against Harmony 2.0.5, default `nclust` was **1.78×**, `nclust=20` was **1.89×**, and `nclust=5` was **2.89×**. Full tables are in [PARITY.md](PARITY.md).
+
+`parity` runs the same kernels once each and prints the min / max absolute difference of every result matrix (`embeddings`, `R`, `Y`, `O`, plus a ridge-only check) in scientific notation. Harmony C++ stores the loop in `float`; harmorust uses `f64`. `nclust=1` isolates the ridge; larger `nclust` also includes independent k-means++ / block shuffles:
+
+```sh
+cargo run -p harmorust --release -- parity --cells 200,500,1000 --nclust 1,5
+./scripts/parity.sh --nclust 1
+```
 
 # JSON in, JSON out (cells × PCs + batch labels)
 cargo run -p harmorust -- run < request.json
