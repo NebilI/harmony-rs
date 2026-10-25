@@ -1,5 +1,6 @@
 use crate::design::Design;
 use crate::linalg::{cosine_distance, l2_normalize_columns, softmax_neg_dist};
+use crate::vectormath::ln_nonpositive_zero;
 use ndarray::{Array1, Array2, ArrayView2};
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -246,15 +247,18 @@ pub fn objective(
     let mut kmeans_error = 0.0;
     let mut entropy = 0.0;
     let mut cross = 0.0;
+    let mut ln_row = vec![0.0f64; n];
 
     for i in 0..k {
         let sigma_i = sigma[i];
+        let rrow = r.row(i);
+        let drow = dist.row(i);
+        let rslice = rrow.as_slice().expect("objective R row is contiguous");
+        ln_nonpositive_zero(&mut ln_row, rslice);
         for j in 0..n {
-            let rij = r[[i, j]];
-            kmeans_error += rij * dist[[i, j]];
-            if rij > 0.0 {
-                entropy += rij * rij.ln() * sigma_i;
-            }
+            let rij = rslice[j];
+            kmeans_error += rij * drow[j];
+            entropy += rij * ln_row[j] * sigma_i;
             let mut log_pen = 0.0;
             for ci in 0..n_cov {
                 log_pen += log_table[[i, design.global_level(ci, j)]];

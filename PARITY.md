@@ -129,6 +129,48 @@ Both kernels get the same embeddings and hyperparameters (`max_iter = 8`, early 
 
 Measured on a 4-core Intel Xeon, OpenBLAS 0.3.26, Harmony 2.0.5, harmorust 0.1.0 (`ncores=4`), after the `update_r` cache, incremental k-means++, the objective log table, and ridge fits that walk per-batch cell lists.
 
+### This machine, before vectorized `exp`/`ln`
+
+Same protocol as the tables below (`max_iter=8`, early stopping off, `lambda=1`, 20 PCs, 4 batches, 2 warmup + 5 repeats, `ncores=4`). Recorded immediately before switching softmax and the objective entropy term to glibc libmvec. Use these rust columns as the before/after baseline for that change — original Harmony times on this box also drift slightly from the older published table.
+
+#### Default `nclust = min(round(N/30), 100)`
+
+| Case | Cells | PCs | Clusters | Original Harmony | harmorust | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| atlas-500 | 500 | 20 | 17 | 15.8 ms | 6.94 ms | 2.28× |
+| atlas-1000 | 1000 | 20 | 33 | 45.9 ms | 25.0 ms | 1.84× |
+| atlas-2000 | 2000 | 20 | 67 | 166.7 ms | 108.7 ms | 1.53× |
+| atlas-4000 | 4000 | 20 | 100 | 509.6 ms | 329.2 ms | 1.55× |
+| atlas-8000 | 8000 | 20 | 100 | 1.06 s | 778.2 ms | 1.37× |
+
+Geometric-mean speedup: **1.68×**.
+
+#### Medium `nclust = 20`
+
+| Case | Cells | PCs | Clusters | Original Harmony | harmorust | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| atlas-500 | 500 | 20 | 20 | 17.5 ms | 7.88 ms | 2.22× |
+| atlas-1000 | 1000 | 20 | 20 | 30.6 ms | 16.0 ms | 1.92× |
+| atlas-2000 | 2000 | 20 | 20 | 57.0 ms | 30.4 ms | 1.87× |
+| atlas-4000 | 4000 | 20 | 20 | 115.2 ms | 61.5 ms | 1.87× |
+| atlas-8000 | 8000 | 20 | 20 | 235.0 ms | 133.5 ms | 1.76× |
+
+Geometric-mean speedup: **1.92×**.
+
+#### Small `nclust = 5`
+
+| Case | Cells | PCs | Clusters | Original Harmony | harmorust | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| atlas-500 | 500 | 20 | 5 | 8.19 ms | 2.22 ms | 3.69× |
+| atlas-1000 | 1000 | 20 | 5 | 13.3 ms | 4.57 ms | 2.92× |
+| atlas-2000 | 2000 | 20 | 5 | 23.8 ms | 8.93 ms | 2.66× |
+| atlas-4000 | 4000 | 20 | 5 | 47.2 ms | 19.3 ms | 2.44× |
+| atlas-8000 | 8000 | 20 | 5 | 98.1 ms | 35.9 ms | 2.73× |
+
+Geometric-mean speedup: **2.86×**.
+
+### Published tables (previous campaign machine)
+
 ### Default `nclust = min(round(N/30), 100)`
 
 This is Harmony's usual workload (many soft clusters, one ridge fit each).

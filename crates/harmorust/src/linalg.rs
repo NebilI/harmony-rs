@@ -1,4 +1,5 @@
 use crate::error::{HarmonyError, Result};
+use crate::vectormath::exp_slice;
 use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 pub fn l2_normalize_columns(z: ArrayView2<'_, f64>) -> Array2<f64> {
@@ -130,23 +131,46 @@ pub fn softmax_neg_dist(dist: ArrayView2<'_, f64>, sigma: ArrayView1<'_, f64>) -
     let k = dist.nrows();
     let n = dist.ncols();
     let mut r = Array2::<f64>::zeros((k, n));
-    for j in 0..n {
-        let mut max_logit = f64::NEG_INFINITY;
-        for i in 0..k {
-            let logit = -dist[[i, j]] / sigma[i];
-            if logit > max_logit {
-                max_logit = logit;
+    if n == 0 || k == 0 {
+        return r;
+    }
+
+    // Rows of the K×N distance matrix are contiguous. Walk cells that way so
+    // libmvec can exp a whole row after a per-cell max reduction.
+    let mut max_logit = vec![f64::NEG_INFINITY; n];
+    for i in 0..k {
+        let inv_sigma = 1.0 / sigma[i];
+        let drow = dist.row(i);
+        for j in 0..n {
+            let logit = -drow[j] * inv_sigma;
+            if logit > max_logit[j] {
+                max_logit[j] = logit;
             }
         }
-        let mut sum = 0.0;
-        for i in 0..k {
-            let v = (-dist[[i, j]] / sigma[i] - max_logit).exp();
-            r[[i, j]] = v;
-            sum += v;
+    }
+
+    let mut scratch = vec![0.0f64; n];
+    let mut sum = vec![0.0f64; n];
+    for i in 0..k {
+        let inv_sigma = 1.0 / sigma[i];
+        let drow = dist.row(i);
+        for j in 0..n {
+            scratch[j] = -drow[j] * inv_sigma - max_logit[j];
         }
-        if sum > 0.0 {
-            for i in 0..k {
-                r[[i, j]] /= sum;
+        let mut row = r.row_mut(i);
+        let rrow = row.as_slice_mut().expect("softmax row is contiguous");
+        exp_slice(rrow, &scratch);
+        for j in 0..n {
+            sum[j] += rrow[j];
+        }
+    }
+
+    for i in 0..k {
+        let mut row = r.row_mut(i);
+        let rrow = row.as_slice_mut().expect("softmax row is contiguous");
+        for j in 0..n {
+            if sum[j] > 0.0 {
+                rrow[j] /= sum[j];
             }
         }
     }
@@ -176,6 +200,36 @@ mod tests {
         let inv = invert(a.view()).unwrap();
         assert!((inv[[0, 0]] - 1.0).abs() < 1e-12);
         assert!(inv[[0, 1]].abs() < 1e-12);
+    }
+
+    #[test]
+    fn softmax_matches_column_wise_scalar() {
+        let dist = array![
+            [0.1, 0.4, 1.2, 0.0],
+            [0.8, 0.2, 0.3, 2.0],
+            [1.5, 0.7, 0.05, 0.9],
+        ];
+        let sigma = array![0.1, 0.2, 0.15];
+        let got = softmax_neg_dist(dist.view(), sigma.view());
+        for j in 0..dist.ncols() {
+            let mut max_logit = f64::NEG_INFINITY;
+            let mut logits = vec![0.0f64; dist.nrows()];
+            for i in 0..dist.nrows() {
+                logits[i] = -dist[[i, j]] / sigma[i];
+                if logits[i] > max_logit {
+                    max_logit = logits[i];
+                }
+            }
+            let mut sum = 0.0;
+            for i in 0..dist.nrows() {
+                sum += (logits[i] - max_logit).exp();
+            }
+            for i in 0..dist.nrows() {
+                let want = (logits[i] - max_logit).exp() / sum;
+                let diff = (got[[i, j]] - want).abs();
+                assert!(diff < 1e-12, "softmax [{i},{j}] |Δ|={diff}");
+            }
+        }
     }
 
     #[test]

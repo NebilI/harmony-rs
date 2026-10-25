@@ -25,6 +25,7 @@ pub mod error;
 pub mod harmony;
 pub mod linalg;
 pub mod metrics;
+mod vectormath;
 pub mod parity;
 pub mod simulate;
 
