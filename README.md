@@ -107,13 +107,37 @@ cargo run -p harmorust --release -- compare --nclust 20
 
 On a 4-core Xeon against Harmony 2.0.5, default `nclust` was **1.78×**, `nclust=20` was **1.89×**, and `nclust=5` was **2.89×**. Full tables are in [PARITY.md](PARITY.md).
 
-`parity` runs the same kernels once each and prints the min / max absolute difference of every result matrix (`embeddings`, `R`, `Y`, `O`, plus a ridge-only check) in scientific notation. Harmony C++ stores the loop in `float`; harmorust uses `f64`. `nclust=1` isolates the ridge; larger `nclust` also includes independent k-means++ / block shuffles:
+### Numerical difference (`float` vs `f64`)
+
+There is no bit-identical match between Harmony’s C++ `float` loop and harmorust’s `f64`. `parity` runs both kernels once on the same atlas and prints **min / max `|harmorust − original|`** in scientific notation.
 
 ```sh
 cargo run -p harmorust --release -- parity --cells 200,500,1000 --nclust 1,5
 ./scripts/parity.sh --nclust 1
 ```
 
+Compared fields: corrected `embeddings`, cluster-aligned `R` / `Y` / `O`, the outer-round `objective`, and `moe_correct_ridge` (harmorust’s ridge applied to Harmony’s final `R`, vs Harmony `Z_corr`). Same embeddings and hyperparameters as `compare` (`max_iter=8`, early stopping off, `lambda=1`, 20 PCs, 4 batches). Measured against Harmony 2.0.5.
+
+**`nclust = 1` (ridge only)** — no clustering ambiguity. Corrected embeddings stay in the float-ulp range. `R` and `O` match to `0` or `1.1102e-16`. Applying harmorust’s ridge to Harmony’s own `R` gives the same max, about `3e-05`.
+
+| Case | Field | Elements | min \|Δ\| | max \|Δ\| |
+| --- | --- | ---: | ---: | ---: |
+| atlas-200 | embeddings | 4000 | 4.9781e-09 | 5.3873e-06 |
+| atlas-500 | embeddings | 10000 | 2.8591e-09 | 3.0002e-05 |
+| atlas-1000 | embeddings | 20000 | 1.1650e-10 | 3.0109e-05 |
+
+**`nclust = 5` (full Harmony loop)** — when k-means++ lands on the same partition, embeddings stay near float ulp. On the 200-cell atlas the partitions diverged (`R` max ≈ 1), so end-to-end embeddings differ by O(1). The ridge on Harmony’s `R` is still ~1e-5 in every case.
+
+| Case | Field | min \|Δ\| | max \|Δ\| |
+| --- | --- | ---: | ---: |
+| atlas-200 | embeddings | 2.2896e-05 | 1.8171e+00 |
+| atlas-200 | moe_correct_ridge | 1.7635e-10 | 9.5990e-06 |
+| atlas-500 | embeddings | 2.5231e-12 | 3.9461e-05 |
+| atlas-1000 | embeddings | 1.8192e-10 | 1.3783e-04 |
+
+The type gap itself is about **1e-10 … 3e-05**. Larger end-to-end diffs come from independent k-means++ and block shuffles, not from `float` vs `f64` in the ridge. Full tables, including aligned `R` / `Y` / `O`, are in [PARITY.md](PARITY.md).
+
+```sh
 # JSON in, JSON out (cells × PCs + batch labels)
 cargo run -p harmorust -- run < request.json
 ```
