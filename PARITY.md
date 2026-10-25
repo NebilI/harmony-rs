@@ -169,7 +169,51 @@ Geometric-mean speedup: **1.92×**.
 
 Geometric-mean speedup: **2.86×**.
 
-### Published tables (previous campaign machine)
+### This machine, after vectorized `exp`/`ln`
+
+Same protocol and the same binary after softmax / objective entropy call glibc libmvec over contiguous `K × N` rows (AVX-512 8-wide when present, else AVX2). **This-change** speedup is harmorust-before / harmorust-after on this box.
+
+Default `nclust` geo-mean vs original: **1.68× → 1.99×**. At 8k cells harmorust went **778.2 ms → 692.7 ms** (1.12× on our side).
+
+#### Default `nclust` after
+
+| Case | Cells | PCs | Clusters | Original Harmony | harmorust | vs original | vs this-machine before |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| atlas-500 | 500 | 20 | 17 | 15.4 ms | 5.52 ms | 2.80× | 1.26× |
+| atlas-1000 | 1000 | 20 | 33 | 46.4 ms | 21.0 ms | 2.21× | 1.19× |
+| atlas-2000 | 2000 | 20 | 67 | 164.6 ms | 89.0 ms | 1.85× | 1.22× |
+| atlas-4000 | 4000 | 20 | 100 | 499.4 ms | 286.6 ms | 1.74× | 1.15× |
+| atlas-8000 | 8000 | 20 | 100 | 1.08 s | 692.7 ms | 1.55× | 1.12× |
+
+Geometric-mean vs original: **1.99×**. Geometric-mean vs this-machine before: **1.19×**.
+
+#### Medium `nclust = 20` after
+
+| Case | Cells | PCs | Clusters | Original Harmony | harmorust | vs original | vs this-machine before |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| atlas-500 | 500 | 20 | 20 | 17.7 ms | 6.94 ms | 2.55× | 1.14× |
+| atlas-1000 | 1000 | 20 | 20 | 30.7 ms | 13.9 ms | 2.21× | 1.15× |
+| atlas-2000 | 2000 | 20 | 20 | 57.9 ms | 26.0 ms | 2.22× | 1.17× |
+| atlas-4000 | 4000 | 20 | 20 | 114.0 ms | 52.2 ms | 2.18× | 1.18× |
+| atlas-8000 | 8000 | 20 | 20 | 232.8 ms | 115.6 ms | 2.01× | 1.15× |
+
+Geometric-mean vs original: **2.23×**. Geometric-mean vs this-machine before: **1.16×**.
+
+#### Small `nclust = 5` after
+
+First 5-repeat pass had a noisy 4k-cell rust median (33.5 ms). The table below is a 7-repeat re-run on the same binary (4k settled at 17.4 ms).
+
+| Case | Cells | PCs | Clusters | Original Harmony | harmorust | vs original | vs this-machine before |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| atlas-500 | 500 | 20 | 5 | 8.38 ms | 1.91 ms | 4.40× | 1.16× |
+| atlas-1000 | 1000 | 20 | 5 | 13.7 ms | 3.95 ms | 3.47× | 1.16× |
+| atlas-2000 | 2000 | 20 | 5 | 24.2 ms | 7.32 ms | 3.31× | 1.22× |
+| atlas-4000 | 4000 | 20 | 5 | 45.4 ms | 17.4 ms | 2.61× | 1.11× |
+| atlas-8000 | 8000 | 20 | 5 | 88.8 ms | 31.8 ms | 2.80× | 1.13× |
+
+Geometric-mean vs original: **3.26×**. Geometric-mean vs this-machine before: **1.16×**.
+
+### Published tables (previous campaign machine, before this change)
 
 ### Default `nclust = min(round(N/30), 100)`
 
@@ -213,6 +257,6 @@ Same atlas as `harmorust bench`, with `nclust` pinned to biology rather than Har
 
 Geometric-mean speedup: **2.89×** (was 2.58×).
 
-The C++ hot path is already one file and is linked to OpenBLAS. Remaining cost is mostly memory layout and per-cell loops that are still row-strided.
+The C++ hot path is already one file and is linked to OpenBLAS. Softmax `exp` and objective entropy `ln` now use libmvec on contiguous rows. Remaining cost is mostly memory layout in the other per-cell loops (assignments, ridge apply) that are still row-strided.
 
 `cargo run -p harmorust --release -- bench --cells 4000` still prints a single harmorust wall time.
