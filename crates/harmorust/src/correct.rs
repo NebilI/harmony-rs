@@ -22,7 +22,11 @@ pub fn moe_correct_ridge(
     batch_prop_cutoff: f64,
     y: &mut Array2<f64>,
 ) -> Result<Array2<f64>> {
-    let k = r.nrows();
+    let z32 = z_orig.mapv(|v| v as f32);
+    let r32 = r.mapv(|v| v as f32);
+    let o32 = o.mapv(|v| v as f32);
+    let e32 = e.mapv(|v| v as f32);
+    let k = r32.nrows();
     let b = design.n_levels;
     let lambda_owned = lambda.map(|l| l.to_vec());
 
@@ -30,10 +34,10 @@ pub fn moe_correct_ridge(
         .into_par_iter()
         .map(|cluster| {
             fit_cluster(
-                z_orig,
-                r.row(cluster),
-                o.row(cluster),
-                e.row(cluster),
+                z32.view(),
+                r32.row(cluster),
+                o32.row(cluster),
+                e32.row(cluster),
                 design,
                 lambda_owned.as_deref(),
                 alpha,
@@ -44,34 +48,36 @@ pub fn moe_correct_ridge(
         .collect();
     let fits = fits?;
 
-    let mut z_corr = z_orig.to_owned();
+    let mut z_corr = z32;
     let d = z_orig.nrows();
+    let mut y32 = y.mapv(|v| v as f32);
     for (cluster, fit) in fits.into_iter().enumerate() {
         let Some(fit) = fit else {
             continue;
         };
-        y.column_mut(cluster).assign(&fit.w_coef.row(0));
+        y32.column_mut(cluster).assign(&fit.w_coef.row(0));
         apply_cluster_correction(
             z_corr.view_mut(),
-            r.row(cluster),
+            r32.row(cluster),
             &fit,
             design,
             d,
         );
     }
 
-    *y = l2_normalize_columns(y.view());
-    Ok(z_corr)
+    let y64 = l2_normalize_columns(y32.mapv(f64::from).view());
+    *y = y64;
+    Ok(z_corr.mapv(f64::from))
 }
 
 struct ClusterFit {
     keep: Vec<usize>,
-    w_coef: Array2<f64>,
+    w_coef: Array2<f32>,
 }
 
 fn apply_cluster_correction(
-    mut z_corr: ndarray::ArrayViewMut2<'_, f64>,
-    rk: ArrayView1<'_, f64>,
+    mut z_corr: ndarray::ArrayViewMut2<'_, f32>,
+    rk: ArrayView1<'_, f32>,
     fit: &ClusterFit,
     design: &Design,
     d: usize,
@@ -91,10 +97,10 @@ fn apply_cluster_correction(
 }
 
 fn fit_cluster(
-    z_orig: ArrayView2<'_, f64>,
-    rk: ArrayView1<'_, f64>,
-    o_row: ArrayView1<'_, f64>,
-    e_row: ArrayView1<'_, f64>,
+    z_orig: ArrayView2<'_, f32>,
+    rk: ArrayView1<'_, f32>,
+    o_row: ArrayView1<'_, f32>,
+    e_row: ArrayView1<'_, f32>,
     design: &Design,
     lambda: Option<&[f64]>,
     alpha: f64,
@@ -109,7 +115,7 @@ fn fit_cluster(
         for local in 0..nlev {
             let bb = offset + local;
             let avg = if design.batch_sizes[bb] > 0.0 {
-                o_row[bb] / design.batch_sizes[bb]
+                f64::from(o_row[bb]) / design.batch_sizes[bb]
             } else {
                 0.0
             };
@@ -143,7 +149,7 @@ fn fit_cluster(
         None => {
             let mut v = vec![0.0];
             for bb in 0..b {
-                v.push(alpha * e_row[bb]);
+                v.push(alpha * f64::from(e_row[bb]));
             }
             v
         }
@@ -151,10 +157,10 @@ fn fit_cluster(
 
     let m = keep_final.len() + 1;
     let mut phi_cov = Array2::<f64>::zeros((m, m));
-    let r_sum: f64 = rk.sum();
+    let r_sum = f64::from(rk.sum());
     phi_cov[[0, 0]] = r_sum + lambda_vec[0];
     for (t, &bb) in keep_final.iter().enumerate() {
-        let ob = o_row[bb];
+        let ob = f64::from(o_row[bb]);
         phi_cov[[0, t + 1]] = ob;
         phi_cov[[t + 1, 0]] = ob;
         phi_cov[[t + 1, t + 1]] = ob + lambda_vec.get(bb + 1).copied().unwrap_or(1.0);
@@ -174,7 +180,7 @@ fn fit_cluster(
                 continue;
             }
             for i in 0..d {
-                rhs[[t + 1, i]] += w * z_orig[[i, j]];
+                rhs[[t + 1, i]] += f64::from(w * z_orig[[i, j]]);
             }
         }
     }
@@ -187,12 +193,12 @@ fn fit_cluster(
             }
         }
     } else {
-        rhs.row_mut(0).assign(&z_orig.dot(&rk));
+        rhs.row_mut(0).assign(&z_orig.dot(&rk).mapv(f64::from));
     }
 
     Ok(Some(ClusterFit {
         keep: keep_final,
-        w_coef: inv_cov.dot(&rhs),
+        w_coef: inv_cov.dot(&rhs).mapv(|v| v as f32),
     }))
 }
 
@@ -406,7 +412,7 @@ mod tests {
                 for j in 0..fast.ncols() {
                     let diff = (fast[[i, j]] - slow[[i, j]]).abs();
                     assert!(
-                        diff < 1e-8,
+                        diff < 1e-6,
                         "Z mismatch n_cov={n_cov} at [{i},{j}]: {diff}"
                     );
                 }
@@ -414,7 +420,7 @@ mod tests {
             for i in 0..y_fast.nrows() {
                 for j in 0..y_fast.ncols() {
                     let diff = (y_fast[[i, j]] - y_slow[[i, j]]).abs();
-                    assert!(diff < 1e-8, "Y mismatch n_cov={n_cov} at [{i},{j}]: {diff}");
+                    assert!(diff < 1e-6, "Y mismatch n_cov={n_cov} at [{i},{j}]: {diff}");
                 }
             }
         }

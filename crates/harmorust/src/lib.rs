@@ -25,13 +25,16 @@ pub mod error;
 pub mod harmony;
 pub mod linalg;
 pub mod metrics;
+mod vectormath;
 pub mod parity;
+mod r_rng;
 pub mod simulate;
 
 pub use config::HarmonyConfig;
 pub use error::{HarmonyError, Result};
 pub use harmony::{embeddings_from_rows, run_harmony, run_harmony_multi, HarmonyResult, HarmonyState};
 pub use metrics::{evaluate, IntegrationMetrics};
+pub use parity::{assert_parity_within, PARITY_MAX_ABS};
 pub use simulate::{simulate_atlas, SimulateSpec, SimulatedAtlas};
 
 #[cfg(test)]

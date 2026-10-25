@@ -2,20 +2,23 @@ use crate::error::{HarmonyError, Result};
 use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 pub fn l2_normalize_columns(z: ArrayView2<'_, f64>) -> Array2<f64> {
-    let mut out = z.to_owned();
+    // Harmony stores the loop in `float`; match that rounding.
+    let mut out = z.mapv(|v| v as f32);
     for mut col in out.columns_mut() {
         let norm = col.dot(&col).sqrt();
         if norm > 0.0 {
             col.mapv_inplace(|v| v / norm);
         }
     }
-    out
+    out.mapv(|v| f64::from(v))
 }
 
 pub fn cosine_distance(y: ArrayView2<'_, f64>, z: ArrayView2<'_, f64>) -> Array2<f64> {
-    // Y is d x K, Z is d x N. Dist = 2 (1 - Y^T Z)
-    let sim = y.t().dot(&z);
-    sim.mapv(|s| 2.0 * (1.0 - s))
+    // Y is d x K, Z is d x N. Dist = 2 (1 - Y^T Z), evaluated in float.
+    let y32 = y.mapv(|v| v as f32);
+    let z32 = z.mapv(|v| v as f32);
+    let sim = y32.t().dot(&z32);
+    sim.mapv(|s| f64::from(2.0 * (1.0 - s)))
 }
 
 pub fn column_l1_normalize(mut r: Array2<f64>) -> Array2<f64> {
@@ -129,28 +132,31 @@ pub fn invert_arrowhead(phi_cov: ArrayView2<'_, f64>) -> Result<Array2<f64>> {
 pub fn softmax_neg_dist(dist: ArrayView2<'_, f64>, sigma: ArrayView1<'_, f64>) -> Array2<f64> {
     let k = dist.nrows();
     let n = dist.ncols();
-    let mut r = Array2::<f64>::zeros((k, n));
-    for j in 0..n {
-        let mut max_logit = f64::NEG_INFINITY;
-        for i in 0..k {
-            let logit = -dist[[i, j]] / sigma[i];
-            if logit > max_logit {
-                max_logit = logit;
-            }
+    if n == 0 || k == 0 {
+        return Array2::<f64>::zeros((k, n));
+    }
+
+    // Harmony C++: R = exp(-dist / σ) then L1-normalise columns, in float.
+    // Cosine distances stay in [0, 4], so expf does not overflow at σ=0.1.
+    let mut r32 = Array2::<f32>::zeros((k, n));
+    let mut sum = vec![0.0f32; n];
+    for i in 0..k {
+        let inv_sigma = 1.0f32 / (sigma[i] as f32);
+        let drow = dist.row(i);
+        for j in 0..n {
+            let v = (-(drow[j] as f32) * inv_sigma).exp();
+            r32[[i, j]] = v;
+            sum[j] += v;
         }
-        let mut sum = 0.0;
-        for i in 0..k {
-            let v = (-dist[[i, j]] / sigma[i] - max_logit).exp();
-            r[[i, j]] = v;
-            sum += v;
-        }
-        if sum > 0.0 {
-            for i in 0..k {
-                r[[i, j]] /= sum;
+    }
+    for i in 0..k {
+        for j in 0..n {
+            if sum[j] > 0.0 {
+                r32[[i, j]] /= sum[j];
             }
         }
     }
-    r
+    r32.mapv(|v| f64::from(v))
 }
 
 pub fn safe_log(x: f64) -> f64 {
@@ -176,6 +182,30 @@ mod tests {
         let inv = invert(a.view()).unwrap();
         assert!((inv[[0, 0]] - 1.0).abs() < 1e-12);
         assert!(inv[[0, 1]].abs() < 1e-12);
+    }
+
+    #[test]
+    fn softmax_matches_column_wise_scalar() {
+        let dist = array![
+            [0.1, 0.4, 1.2, 0.0],
+            [0.8, 0.2, 0.3, 2.0],
+            [1.5, 0.7, 0.05, 0.9],
+        ];
+        let sigma = array![0.1, 0.2, 0.15];
+        let got = softmax_neg_dist(dist.view(), sigma.view());
+        for j in 0..dist.ncols() {
+            let mut sum = 0.0f32;
+            let mut vals = vec![0.0f32; dist.nrows()];
+            for i in 0..dist.nrows() {
+                vals[i] = (-(dist[[i, j]] as f32) / (sigma[i] as f32)).exp();
+                sum += vals[i];
+            }
+            for i in 0..dist.nrows() {
+                let want = f64::from(vals[i] / sum);
+                let diff = (got[[i, j]] - want).abs();
+                assert!(diff < 1e-7, "softmax [{i},{j}] |Δ|={diff}");
+            }
+        }
     }
 
     #[test]
