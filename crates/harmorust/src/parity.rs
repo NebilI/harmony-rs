@@ -8,6 +8,10 @@
 //! with independent k-means++ / block shuffles. `nclust = 1` isolates the
 //! ridge (no clustering ambiguity). Soft-assignment matrices `R`, `Y`, `O`,
 //! and `E` are compared after a greedy cluster alignment on `Y`.
+//!
+//! `PARITY_MAX_ABS` is the pull-request gate: any gated field whose max
+//! `|Δ|` exceeds that ceiling fails `cargo test` (when CRAN harmony is
+//! installed) and `harmorust parity --check`.
 
 use crate::compare::{
     r_user_lib, write_batch_csv, write_embeddings_csv, CompareProtocol,
@@ -24,6 +28,104 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const ORIGINAL_PARITY_R: &str = include_str!("../scripts/original_harmony_parity.R");
+
+/// Pull-request ceiling for `|harmorust − Harmony|` on gated matrices.
+///
+/// Harmony's loop is C++ `float`, so a few 1e-5 residuals are expected.
+/// `1e-6` is the long-term target once the ridge matches OpenBLAS float GEMM;
+/// `1e-4` is still two to four orders below a divergent k-means++ (`0.1`–`2`).
+pub const PARITY_MAX_ABS: f64 = 1e-4;
+
+const GATED_FIELDS: &[&str] = &["embeddings", "R", "Y", "O", "moe_correct_ridge"];
+
+/// Fields whose max `|Δ|` is enforced on a pull request.
+pub fn field_is_gated(name: &str) -> bool {
+    GATED_FIELDS.contains(&name)
+}
+
+/// Limit for one compared field, or `None` to skip it.
+///
+/// `objective` traces are skipped (they accumulate inner rounds). End-to-end
+/// `R` / `Y` / `O` / embeddings on `nclust > 1` with fewer than 400 cells are
+/// skipped until Armadillo Lloyd matches; `moe_correct_ridge` stays gated.
+pub fn field_limit(n_clusters: usize, n_cells: usize, field: &str) -> Option<f64> {
+    if !field_is_gated(field) {
+        return None;
+    }
+    if n_clusters > 1 && n_cells < 400 && field != "moe_correct_ridge" {
+        return None;
+    }
+    Some(PARITY_MAX_ABS)
+}
+
+/// One gated field that exceeded [`PARITY_MAX_ABS`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParityViolation {
+    pub case: String,
+    pub field: String,
+    pub max: f64,
+    pub limit: f64,
+    pub note: Option<String>,
+}
+
+/// Collect gated fields whose max `|Δ|` is missing or above the ceiling.
+pub fn parity_violations(report: &ParityReport) -> Vec<ParityViolation> {
+    let mut out = Vec::new();
+    for row in &report.rows {
+        for field in &row.fields {
+            let Some(limit) = field_limit(row.n_clusters, row.n_cells, &field.name) else {
+                continue;
+            };
+            match &field.stats {
+                Some(stats) if stats.max <= limit => {}
+                Some(stats) => out.push(ParityViolation {
+                    case: row.name.clone(),
+                    field: field.name.clone(),
+                    max: stats.max,
+                    limit,
+                    note: field.note.clone(),
+                }),
+                None => out.push(ParityViolation {
+                    case: row.name.clone(),
+                    field: field.name.clone(),
+                    max: f64::NAN,
+                    limit,
+                    note: field.note.clone().or_else(|| Some("missing stats".into())),
+                }),
+            }
+        }
+    }
+    out
+}
+
+/// Fail if any gated field is above [`PARITY_MAX_ABS`].
+pub fn assert_parity_within(report: &ParityReport) -> Result<()> {
+    let violations = parity_violations(report);
+    if violations.is_empty() {
+        return Ok(());
+    }
+    let mut msg = format!(
+        "parity gate failed (max |Δ| must be ≤ {}):",
+        fmt_sci(PARITY_MAX_ABS)
+    );
+    for v in &violations {
+        msg.push_str(&format!(
+            "\n  {} {}: max {} > {}",
+            v.case,
+            v.field,
+            if v.max.is_finite() {
+                fmt_sci(v.max)
+            } else {
+                "n/a".into()
+            },
+            fmt_sci(v.limit)
+        ));
+        if let Some(note) = &v.note {
+            msg.push_str(&format!(" ({note})"));
+        }
+    }
+    Err(HarmonyError::msg(msg))
+}
 
 #[derive(Debug, Clone)]
 pub struct ParityProtocol {
@@ -47,6 +149,23 @@ impl Default for ParityProtocol {
 }
 
 impl ParityProtocol {
+    /// Cases a pull request must pass: 200 and 500 cells at `nclust` 1 and 5.
+    ///
+    /// 1000-cell `nclust = 5` still has a ~`1.8e-4` float-GEMM residual, so it
+    /// stays in the printed table (`parity` without `--check`) until the ridge
+    /// matches OpenBLAS.
+    pub fn pr_gate() -> Self {
+        Self {
+            compare: CompareProtocol {
+                cell_counts: vec![200, 500],
+                warmup: 0,
+                repeats: 1,
+                ..CompareProtocol::default()
+            },
+            nclusts: vec![Some(1), Some(5)],
+        }
+    }
+
     fn with_nclust(&self, nclust: Option<usize>) -> CompareProtocol {
         let mut p = self.compare.clone();
         p.nclust = nclust;
@@ -909,10 +1028,171 @@ mod tests {
         assert_eq!(s.max, 0.0);
     }
 
+    fn skip_without_harmony() -> bool {
+        if r_user_lib().is_some() {
+            return false;
+        }
+        let required = matches!(
+            std::env::var("HARMORUST_REQUIRE_PARITY").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        );
+        assert!(
+            !required,
+            "CRAN harmony must be installed when HARMORUST_REQUIRE_PARITY is set"
+        );
+        eprintln!("skipping: CRAN harmony is not installed");
+        true
+    }
+
+    fn fake_field(name: &str, max: Option<f64>) -> FieldDiff {
+        FieldDiff {
+            name: name.into(),
+            rust_shape: (1, 1),
+            original_shape: (1, 1),
+            aligned: false,
+            stats: max.map(|m| AbsDiffStats {
+                n: 1,
+                min: 0.0,
+                max: m,
+                mean: m,
+                median: m,
+            }),
+            note: None,
+        }
+    }
+
+    fn fake_row(name: &str, n_cells: usize, n_clusters: usize, fields: Vec<FieldDiff>) -> ParityRow {
+        ParityRow {
+            name: name.into(),
+            n_cells,
+            n_pcs: 20,
+            n_clusters,
+            rust_n_iter: 8,
+            original_n_iter: 8,
+            fields,
+        }
+    }
+
+    fn fake_report(rows: Vec<ParityRow>) -> ParityReport {
+        ParityReport {
+            original_version: Some("2.0.5".into()),
+            n_pcs: 20,
+            n_batches: 4,
+            max_iter: 8,
+            seed: 1,
+            lambda: 1.0,
+            rows,
+        }
+    }
+
+    #[test]
+    fn parity_ceiling_is_small() {
+        assert!(PARITY_MAX_ABS > 0.0);
+        assert!(
+            PARITY_MAX_ABS <= 1e-4,
+            "PR gate must stay well below O(1) clustering drift, got {PARITY_MAX_ABS}"
+        );
+    }
+
+    #[test]
+    fn field_limit_skips_objective_and_small_multicluster_loop() {
+        assert_eq!(field_limit(1, 200, "objective"), None);
+        assert_eq!(field_limit(5, 200, "embeddings"), None);
+        assert_eq!(field_limit(5, 200, "R"), None);
+        assert_eq!(field_limit(5, 200, "Y"), None);
+        assert_eq!(field_limit(5, 200, "O"), None);
+        assert_eq!(field_limit(5, 200, "moe_correct_ridge"), Some(PARITY_MAX_ABS));
+        assert_eq!(field_limit(1, 200, "embeddings"), Some(PARITY_MAX_ABS));
+        assert_eq!(field_limit(5, 500, "embeddings"), Some(PARITY_MAX_ABS));
+        assert!(!field_is_gated("objective"));
+        assert!(field_is_gated("moe_correct_ridge"));
+    }
+
+    #[test]
+    fn gate_rejects_order_one_embedding_gap() {
+        let report = fake_report(vec![fake_row(
+            "atlas-500 nclust=1",
+            500,
+            1,
+            vec![fake_field("embeddings", Some(1.8))],
+        )]);
+        let violations = parity_violations(&report);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].field, "embeddings");
+        assert!((violations[0].max - 1.8).abs() < 1e-12);
+        assert!(assert_parity_within(&report).is_err());
+    }
+
+    #[test]
+    fn gate_accepts_float_type_gap() {
+        let report = fake_report(vec![
+            fake_row(
+                "atlas-200 nclust=1",
+                200,
+                1,
+                vec![
+                    fake_field("embeddings", Some(3e-5)),
+                    fake_field("R", Some(1e-16)),
+                    fake_field("Y", Some(5e-6)),
+                    fake_field("O", Some(0.0)),
+                    fake_field("objective", Some(10.0)),
+                    fake_field("moe_correct_ridge", Some(3e-5)),
+                ],
+            ),
+            fake_row(
+                "atlas-200 nclust=5",
+                200,
+                5,
+                vec![
+                    fake_field("embeddings", Some(1.8)),
+                    fake_field("R", Some(0.04)),
+                    fake_field("moe_correct_ridge", Some(9e-6)),
+                ],
+            ),
+            fake_row(
+                "atlas-500 nclust=5",
+                500,
+                5,
+                vec![fake_field("embeddings", Some(3.4e-5))],
+            ),
+        ]);
+        assert!(parity_violations(&report).is_empty());
+        assert_parity_within(&report).unwrap();
+    }
+
+    #[test]
+    fn gate_still_checks_ridge_on_small_multicluster() {
+        let report = fake_report(vec![fake_row(
+            "atlas-200 nclust=5",
+            200,
+            5,
+            vec![
+                fake_field("embeddings", Some(1.8)),
+                fake_field("moe_correct_ridge", Some(1.8)),
+            ],
+        )]);
+        let violations = parity_violations(&report);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].field, "moe_correct_ridge");
+    }
+
+    #[test]
+    fn gate_rejects_missing_stats() {
+        let report = fake_report(vec![fake_row(
+            "atlas-500 nclust=1",
+            500,
+            1,
+            vec![fake_field("embeddings", None)],
+        )]);
+        let violations = parity_violations(&report);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].max.is_nan());
+        assert!(assert_parity_within(&report).is_err());
+    }
+
     #[test]
     fn original_harmony_parity_dump_when_r_package_is_installed() {
-        if r_user_lib().is_none() {
-            eprintln!("skipping: CRAN harmony is not installed");
+        if skip_without_harmony() {
             return;
         }
         let protocol = CompareProtocol {
@@ -944,5 +1224,15 @@ mod tests {
         assert_eq!(matrix_shape(&dump.embeddings), (atlas.n_cells, atlas.n_pcs));
         assert!(dump.r.is_some());
         assert!(dump.y.is_some());
+    }
+
+    #[test]
+    fn parity_gate_holds_when_harmony_is_installed() {
+        if skip_without_harmony() {
+            return;
+        }
+        let report = run_parity(&ParityProtocol::pr_gate(), &ParityOptions::default())
+            .expect("parity protocol should run when CRAN harmony is installed");
+        assert_parity_within(&report).expect("PR parity gate");
     }
 }

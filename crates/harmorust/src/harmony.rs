@@ -4,6 +4,7 @@ use crate::correct::{default_lambda, moe_correct_ridge};
 use crate::design::{encode_covariates, encode_labels, expand_lambda, expand_theta, Design};
 use crate::error::{HarmonyError, Result};
 use crate::linalg::{l2_normalize_columns, softmax_neg_dist};
+use crate::r_rng::RRng;
 use ndarray::{Array1, Array2, ArrayView2};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -46,6 +47,7 @@ pub struct HarmonyState {
     pub objective_kmeans: Vec<f64>,
     pub objective_harmony: Vec<f64>,
     pub kmeans_rounds: Vec<usize>,
+    block_rng: ChaCha8Rng,
 }
 
 /// Run Harmony on a cells × PCs embedding and a single batch vector.
@@ -122,11 +124,14 @@ impl HarmonyState {
         }
 
         let k = config.resolved_nclust(n);
-        let mut rng = ChaCha8Rng::seed_from_u64(config.seed);
+        // Same integer seed as R `set.seed`, so k-means++ consumes Harmony's
+        // `unif_rand` stream. Embeddings are stored as C++ `float` first.
+        let mut rng = RRng::from_harmony_seed(config.seed);
 
         // Internal layout is PCs × cells, matching the C++ Harmony object.
-        let z_orig = embeddings.t().to_owned();
+        let z_orig = embeddings.t().mapv(|v| f64::from(v as f32));
         let z_corr = l2_normalize_columns(z_orig.view());
+        let z_corr = z_corr.mapv(|v| f64::from(v as f32));
         let y = kmeans_cosine(z_corr.view(), k, &mut rng, 10);
         let sigma = Array1::from_elem(k, config.sigma);
         let (r, dist) = init_r(y.view(), z_corr.view(), &sigma);
@@ -159,6 +164,7 @@ impl HarmonyState {
             objective_kmeans: Vec::new(),
             objective_harmony: Vec::new(),
             kmeans_rounds: Vec::new(),
+            block_rng: ChaCha8Rng::seed_from_u64(config.seed.wrapping_add(17)),
         };
         let obj = state.current_objective();
         state.objective_kmeans.push(obj);
@@ -178,7 +184,7 @@ impl HarmonyState {
         )
     }
 
-    fn cluster_round(&mut self, rng: &mut ChaCha8Rng) {
+    fn cluster_round(&mut self) {
         // After a correction, re-estimate R from the new Z_corr and current Y.
         if !self.kmeans_rounds.is_empty() {
             self.z_corr = l2_normalize_columns(self.z_corr.view());
@@ -206,7 +212,7 @@ impl HarmonyState {
                 &mut self.o,
                 &mut self.e,
                 self.config.block_size,
-                rng,
+                &mut self.block_rng,
             );
             let obj = self.current_objective();
             self.objective_kmeans.push(obj);
@@ -250,12 +256,11 @@ impl HarmonyState {
     }
 
     pub fn run(&mut self) -> Result<HarmonyResult> {
-        let mut rng = ChaCha8Rng::seed_from_u64(self.config.seed.wrapping_add(17));
         let mut n_iter = 0usize;
         let mut converged = false;
         for _ in 0..self.config.max_iter {
             n_iter += 1;
-            self.cluster_round(&mut rng);
+            self.cluster_round();
             self.z_corr = moe_correct_ridge(
                 self.z_orig.view(),
                 self.r.view(),

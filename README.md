@@ -83,7 +83,7 @@ Push-only updates to GitHub:
 
 ## Run the Rust kernel
 
-Needs a Rust toolchain (`rustc` ≥ 1.81).
+Needs a Rust toolchain (`rustc` ≥ 1.89).
 
 ```sh
 cargo test -p harmorust
@@ -95,6 +95,9 @@ cargo run -p harmorust --release -- compare
 
 # numerical |harmorust − original| (min / max abs diff, scientific notation)
 cargo run -p harmorust --release -- parity
+
+# PR gate: fail if a gated max |Δ| exceeds 1e-4
+cargo run -p harmorust --release -- parity --check
 ```
 
 `compare` builds a synthetic atlas at several cell counts, runs both kernels with the same hyperparameters (`max_iter=8`, early stopping off, Harmony's default `nclust`), and prints median wall time plus a speedup column (`original / harmorust`). Repeat it whenever you want fresh numbers:
@@ -105,7 +108,7 @@ cargo run -p harmorust --release -- compare --nclust 5
 cargo run -p harmorust --release -- compare --nclust 20
 ```
 
-On a 4-core Xeon against Harmony 2.0.5, default `nclust` was **1.78×**, `nclust=20` was **1.89×**, and `nclust=5` was **2.89×**. Full tables are in [PARITY.md](PARITY.md).
+On a 4-core Xeon against Harmony 2.0.5, after the Rust `std::arch` `exp`/`ln` (rustc ≥ 1.89), default `nclust` was **1.94×**, `nclust=20` was **2.17×**, and `nclust=5` was **3.12×**. Versus the scalar kernel on this machine that is **1.15× / 1.14× / 1.12×**. The earlier libmvec C landing was a few percent faster (1.99× / 2.23× / 3.26× vs original). Full tables are in [PARITY.md](PARITY.md).
 
 ### Numerical difference (`float` vs `f64`)
 
@@ -118,24 +121,28 @@ cargo run -p harmorust --release -- parity --cells 200,500,1000 --nclust 1,5
 
 Compared fields: corrected `embeddings`, cluster-aligned `R` / `Y` / `O`, the outer-round `objective`, and `moe_correct_ridge` (harmorust’s ridge applied to Harmony’s final `R`, vs Harmony `Z_corr`). Same embeddings and hyperparameters as `compare` (`max_iter=8`, early stopping off, `lambda=1`, 20 PCs, 4 batches). Measured against Harmony 2.0.5.
 
-**`nclust = 1` (ridge only)** — no clustering ambiguity. Corrected embeddings stay in the float-ulp range. `R` and `O` match to `0` or `1.1102e-16`. Applying harmorust’s ridge to Harmony’s own `R` gives the same max, about `3e-05`.
+**`nclust = 1` (ridge only)** — no clustering ambiguity. Some embedding entries now match exactly. Max stays around `3e-05` from float GEMM vs our index-walk ridge. `R` and `O` match to `0` or `1.1102e-16`.
 
 | Case | Field | Elements | min \|Δ\| | max \|Δ\| |
 | --- | --- | ---: | ---: | ---: |
-| atlas-200 | embeddings | 4000 | 4.9781e-09 | 5.3873e-06 |
-| atlas-500 | embeddings | 10000 | 2.8591e-09 | 3.0002e-05 |
-| atlas-1000 | embeddings | 20000 | 1.1650e-10 | 3.0109e-05 |
+| atlas-200 | embeddings | 4000 | 0.0000e+00 | 5.2899e-06 |
+| atlas-500 | embeddings | 10000 | 0.0000e+00 | 2.9922e-05 |
+| atlas-1000 | embeddings | 20000 | 0.0000e+00 | 3.0100e-05 |
 
-**`nclust = 5` (full Harmony loop)** — when k-means++ lands on the same partition, embeddings stay near float ulp. On the 200-cell atlas the partitions diverged (`R` max ≈ 1), so end-to-end embeddings differ by O(1). The ridge on Harmony’s `R` is still ~1e-5 in every case.
+**`nclust = 5` (full Harmony loop)** — matching Harmony's k-means++ and R's `runif` cut the old 200-cell O(1) gap (`R` max ≈ 1) to `~3e-02`. 500-cell embeddings stay near `3e-05`. Ridge on Harmony’s `R` is still `≤1e-04`.
 
 | Case | Field | min \|Δ\| | max \|Δ\| |
 | --- | --- | ---: | ---: |
-| atlas-200 | embeddings | 2.2896e-05 | 1.8171e+00 |
-| atlas-200 | moe_correct_ridge | 1.7635e-10 | 9.5990e-06 |
-| atlas-500 | embeddings | 2.5231e-12 | 3.9461e-05 |
-| atlas-1000 | embeddings | 1.8192e-10 | 1.3783e-04 |
+| atlas-200 | embeddings | 0.0000e+00 | 3.4487e-02 |
+| atlas-200 | moe_correct_ridge | 0.0000e+00 | 9.7752e-06 |
+| atlas-500 | embeddings | 0.0000e+00 | 3.4332e-05 |
+| atlas-1000 | embeddings | 1.4901e-08 | 1.7810e-04 |
 
-The type gap itself is about **1e-10 … 3e-05**. Larger end-to-end diffs come from independent k-means++ and block shuffles, not from `float` vs `f64` in the ridge. Full tables, including aligned `R` / `Y` / `O`, are in [PARITY.md](PARITY.md).
+The remaining `3e-02` on the 200-cell / 5-cluster case is Armadillo Lloyd + block shuffle, not the ridge. Full tables, including aligned `R` / `Y` / `O`, are in [PARITY.md](PARITY.md).
+
+### Pull-request gate
+
+PRs fail CI if a gated field’s max `|Δ|` exceeds `1e-4` (`PARITY_MAX_ABS` in `parity.rs`). That rejects O(1) clustering drift while allowing the remaining C++ `float` residual. Unit tests of the gate always run; the live Harmony comparison runs in CI (and locally when CRAN harmony is installed). `HARMORUST_REQUIRE_PARITY=1` makes a missing Harmony install a test failure instead of a skip.
 
 ```sh
 # JSON in, JSON out (cells × PCs + batch labels)

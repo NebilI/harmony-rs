@@ -1,6 +1,7 @@
 use harmorust::compare::{print_report, run_compare, CompareOptions, CompareProtocol};
 use harmorust::parity::{
-    print_report as print_parity_report, run_parity, ParityOptions, ParityProtocol,
+    assert_parity_within, fmt_sci, print_report as print_parity_report, run_parity, ParityOptions,
+    ParityProtocol, PARITY_MAX_ABS,
 };
 use harmorust::{
     embeddings_from_rows, evaluate, run_harmony, run_harmony_multi, simulate_atlas, HarmonyConfig,
@@ -213,9 +214,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut protocol = ParityProtocol::default();
             let mut opts = ParityOptions::default();
             let mut json = false;
+            let mut check = false;
+            let mut cells_explicit = false;
             while let Some(flag) = args.next() {
                 match flag.as_str() {
                     "--cells" => {
+                        cells_explicit = true;
                         protocol.compare.cell_counts =
                             parse_usize_list(&args.next().ok_or("missing --cells")?)?
                     }
@@ -247,9 +251,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         opts.rscript = args.next().ok_or("missing --rscript")?.into();
                     }
                     "--json" => json = true,
+                    "--check" => check = true,
                     "--early-stop" => protocol.compare.early_stop = true,
                     other => return Err(format!("unknown flag {other}").into()),
                 }
+            }
+            if check && !cells_explicit {
+                protocol.compare.cell_counts = ParityProtocol::pr_gate().compare.cell_counts;
             }
             std::env::set_var(
                 "RAYON_NUM_THREADS",
@@ -257,6 +265,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
             let report = run_parity(&protocol, &opts)?;
             print_parity_report(&report, json);
+            if check {
+                assert_parity_within(&report)?;
+                if !json {
+                    eprintln!(
+                        "parity gate passed: gated max |Δ| ≤ {}",
+                        fmt_sci(PARITY_MAX_ABS)
+                    );
+                }
+            }
         }
         _ => {
             eprintln!("harmorust — Rust Harmony (seurust-style kernel port)\n");
@@ -265,7 +282,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("  harmorust demo [--cells N] [--batch-strength S] [--seed SEED]");
             eprintln!("  harmorust bench [--cells N]");
             eprintln!("  harmorust compare [--cells N,N,...] [--warmup W] [--repeats R] [--ncores N]");
-            eprintln!("  harmorust parity [--cells N,N,...] [--nclust K,K,...] [--json]");
+            eprintln!(
+                "  harmorust parity [--cells N,N,...] [--nclust K,K,...] [--check] [--json]"
+            );
         }
     }
     Ok(())
