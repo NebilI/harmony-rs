@@ -68,7 +68,7 @@ Both sides see the same embeddings and hyperparameters (`max_iter = 8`, early st
 
 `nclust = 1` is ordinary ridge (no clustering ambiguity), so those rows are the cleanest float-vs-f64 signal. Larger `nclust` also includes independent k-means++ seeding and block shuffles, so max `|Δ|` can jump from machine-epsilon-for-float (~1e-7) to O(1).
 
-Measured on this machine against Harmony 2.0.5 / harmorust 0.1.0 (`ncores=4`). Re-run `./scripts/parity.sh` to refresh the table.
+Measured on this machine against Harmony 2.0.5 / harmorust 0.1.0 (`ncores=4`). Re-ran `./scripts/parity.sh --cells 200,500,1000 --nclust 1,5 --ncores 4` after the `std::arch` `exp`/`ln` (rustc 1.89, same seed and protocol). Printed min / max `|Δ|` are unchanged from the tables below.
 
 ### `nclust = 1` (ridge only)
 
