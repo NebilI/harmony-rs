@@ -1,17 +1,38 @@
 use harmorust::compare::{print_report, run_compare, CompareOptions, CompareProtocol};
 use harmorust::{
-    embeddings_from_rows, evaluate, run_harmony, simulate_atlas, HarmonyConfig, SimulateSpec,
+    embeddings_from_rows, evaluate, run_harmony, run_harmony_multi, simulate_atlas, HarmonyConfig,
+    HarmonyResult, SimulateSpec,
 };
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::{Read, Write};
 
+/// JSON number or array of numbers (jsonlite may unbox length-1 vectors).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum NumList {
+    Scalar(f64),
+    Vec(Vec<f64>),
+}
+
 #[derive(Debug, Deserialize)]
 struct RunRequest {
+    /// Cells × PCs.
     embeddings: Vec<Vec<f64>>,
-    batch: Vec<String>,
+    /// Single batch vector (legacy / simple API).
+    #[serde(default)]
+    batch: Option<Vec<String>>,
+    /// One or more covariates (Harmony `vars_use`). Overrides `batch` when set.
+    #[serde(default)]
+    covariates: Option<Vec<Vec<String>>>,
     #[serde(default)]
     cell_type: Option<Vec<String>>,
+    /// Diversity penalty: one value or one per covariate.
+    #[serde(default)]
+    theta: Option<NumList>,
+    /// Ridge penalty: omit / null for automatic lambda; one value or one per covariate.
+    #[serde(default)]
+    lambda: Option<NumList>,
     #[serde(default)]
     config: Option<HarmonyConfig>,
 }
@@ -19,12 +40,36 @@ struct RunRequest {
 #[derive(Debug, Serialize)]
 struct RunResponse {
     embeddings: Vec<Vec<f64>>,
+    r: Vec<Vec<f64>>,
+    y: Vec<Vec<f64>>,
+    o: Vec<Vec<f64>>,
     n_iter: usize,
     converged: bool,
     n_clusters: usize,
     objective: Vec<f64>,
+    objective_kmeans: Vec<f64>,
+    kmeans_rounds: Vec<usize>,
     before: Option<harmorust::IntegrationMetrics>,
     after: Option<harmorust::IntegrationMetrics>,
+}
+
+impl From<HarmonyResult> for RunResponse {
+    fn from(result: HarmonyResult) -> Self {
+        Self {
+            embeddings: result.embeddings,
+            r: result.r,
+            y: result.y,
+            o: result.o,
+            n_iter: result.n_iter,
+            converged: result.converged,
+            n_clusters: result.n_clusters,
+            objective: result.objective,
+            objective_kmeans: result.objective_kmeans,
+            kmeans_rounds: result.kmeans_rounds,
+            before: None,
+            after: None,
+        }
+    }
 }
 
 fn main() {
@@ -70,8 +115,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let atlas = simulate_atlas(&spec);
             let req = RunRequest {
                 embeddings: atlas.embeddings,
-                batch: atlas.batch,
+                batch: Some(atlas.batch),
+                covariates: None,
                 cell_type: Some(atlas.cell_type),
+                theta: None,
+                lambda: Some(NumList::Scalar(1.0)),
                 config: Some(HarmonyConfig {
                     nclust: Some(9),
                     seed,
@@ -120,7 +168,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             while let Some(flag) = args.next() {
                 match flag.as_str() {
                     "--cells" => {
-                        protocol.cell_counts = parse_usize_list(&args.next().ok_or("missing --cells")?)?
+                        protocol.cell_counts =
+                            parse_usize_list(&args.next().ok_or("missing --cells")?)?
                     }
                     "--pcs" => protocol.n_pcs = args.next().ok_or("missing --pcs")?.parse()?,
                     "--batches" => {
@@ -185,23 +234,63 @@ fn parse_usize_list(raw: &str) -> Result<Vec<usize>, Box<dyn std::error::Error>>
 
 fn integrate(req: &RunRequest) -> Result<RunResponse, Box<dyn std::error::Error>> {
     let z = embeddings_from_rows(&req.embeddings)?;
-    let cfg = req.config.clone().unwrap_or_default();
+    let mut cfg = req.config.clone().unwrap_or_default();
+
+    let covariates: Vec<Vec<String>> = if let Some(covs) = &req.covariates {
+        if covs.is_empty() {
+            return Err("covariates must be non-empty when provided".into());
+        }
+        covs.clone()
+    } else if let Some(batch) = &req.batch {
+        vec![batch.clone()]
+    } else {
+        return Err("need batch or covariates".into());
+    };
+
+    let lambda_vec = req.lambda.as_ref().map(|l| match l {
+        NumList::Scalar(x) => vec![*x],
+        NumList::Vec(v) => v.clone(),
+    });
+    if let Some(lambda) = &lambda_vec {
+        if let Some(first) = lambda.first() {
+            // Length > 1 is applied below via run_harmony_multi.
+            cfg.lambda = Some(*first);
+        }
+    }
+
+    let theta = req
+        .theta
+        .as_ref()
+        .map(|t| match t {
+            NumList::Scalar(x) => vec![*x],
+            NumList::Vec(v) => v.clone(),
+        })
+        .unwrap_or_else(|| vec![cfg.theta; covariates.len()]);
+
+    let result = if covariates.len() == 1 && lambda_vec.as_ref().map(|l| l.len()).unwrap_or(1) <= 1
+    {
+        run_harmony(z.view(), &covariates[0], &cfg)?
+    } else {
+        run_harmony_multi(
+            z.view(),
+            &covariates,
+            &theta,
+            lambda_vec.as_deref(),
+            &cfg,
+        )?
+    };
+
     let before = req
         .cell_type
         .as_ref()
-        .map(|types| evaluate(z.view(), &req.batch, types));
-    let result = run_harmony(z.view(), &req.batch, &cfg)?;
+        .map(|types| evaluate(z.view(), &covariates[0], types));
     let after = req.cell_type.as_ref().map(|types| {
         let corr = embeddings_from_rows(&result.embeddings).expect("corrected rows");
-        evaluate(corr.view(), &req.batch, types)
+        evaluate(corr.view(), &covariates[0], types)
     });
-    Ok(RunResponse {
-        embeddings: result.embeddings,
-        n_iter: result.n_iter,
-        converged: result.converged,
-        n_clusters: result.n_clusters,
-        objective: result.objective,
-        before,
-        after,
-    })
+
+    let mut out = RunResponse::from(result);
+    out.before = before;
+    out.after = after;
+    Ok(out)
 }

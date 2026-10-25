@@ -20,7 +20,7 @@ type separation   3.21 → 3.21
 | --- | --- |
 | `crates/harmorust` | Rust crate + CLI. This is the kernel. |
 | `web` | Next.js demo: synthetic atlas, before/after PCs, LISI. |
-| `r/harmorust` | R package skeleton with the `RunHarmony()` signature, ready for an extendr bind like seurust. |
+| `r/harmorust` | R package with Harmony's public API (`RunHarmony` for matrix / Seurat / SCE, `harmony_options`, convergence plot). Calls the Rust CLI. |
 | `examples/with_seurust.R` | How the two packages sit in one Seurat workflow. |
 
 ## Pipeline next to seurust
@@ -36,12 +36,26 @@ counts
 Harmony never touches the count matrix. If seurust already got you to PCA, this crate is the integration step.
 
 ```r
+# build the CLI once, then point R at it
+# cargo build -p harmorust --release
+# export HARMORUST_BIN=$PWD/target/release/harmorust
+
 seurat <- RunPCA(seurat)
 seurat <- harmorust::RunHarmony(seurat, group.by.vars = "donor")
 seurat <- RunUMAP(seurat, reduction = "harmony")
 ```
 
-See [PARITY.md](PARITY.md) for the Harmony 2.0.4 checklist: what matches, what is faster, and what still needs an R fixture test.
+Matrix form (same arguments as `harmony::RunHarmony`):
+
+```r
+corrected <- harmorust::RunHarmony(
+  pca_matrix, meta_data, vars_use = "donor",
+  nclust = 20, return_object = TRUE
+)
+harmorust::HarmonyConvergencePlot(corrected)
+```
+
+See [PARITY.md](PARITY.md) for the Harmony 2.0.5 checklist: API surface, speed tables, and remaining numerical differences.
 
 ## GitHub source, Origin mirror
 

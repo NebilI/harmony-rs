@@ -22,7 +22,11 @@ pub struct HarmonyResult {
     pub n_iter: usize,
     pub converged: bool,
     pub n_clusters: usize,
+    /// Outer-round objectives (Harmony's `objective_harmony`).
     pub objective: Vec<f64>,
+    /// Inner clustering objectives (Harmony's `objective_kmeans`), used by
+    /// `HarmonyConvergencePlot`.
+    pub objective_kmeans: Vec<f64>,
     pub kmeans_rounds: Vec<usize>,
 }
 
@@ -278,6 +282,7 @@ impl HarmonyState {
             converged,
             n_clusters: self.y.ncols(),
             objective: self.objective_harmony.clone(),
+            objective_kmeans: self.objective_kmeans.clone(),
             kmeans_rounds: self.kmeans_rounds.clone(),
         })
     }
