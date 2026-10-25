@@ -136,7 +136,7 @@ pub fn softmax_neg_dist(dist: ArrayView2<'_, f64>, sigma: ArrayView1<'_, f64>) -
     }
 
     // Rows of the K×N distance matrix are contiguous. Walk cells that way so
-    // libmvec can exp a whole row after a per-cell max reduction.
+    // SIMD exp can cover a whole row after a per-cell max reduction.
     let mut max_logit = vec![f64::NEG_INFINITY; n];
     for i in 0..k {
         let inv_sigma = 1.0 / sigma[i];

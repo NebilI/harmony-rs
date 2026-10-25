@@ -131,7 +131,7 @@ Measured on a 4-core Intel Xeon, OpenBLAS 0.3.26, Harmony 2.0.5, harmorust 0.1.0
 
 ### This machine, before vectorized `exp`/`ln`
 
-Same protocol as the tables below (`max_iter=8`, early stopping off, `lambda=1`, 20 PCs, 4 batches, 2 warmup + 5 repeats, `ncores=4`). Recorded immediately before switching softmax and the objective entropy term to glibc libmvec. Use these rust columns as the before/after baseline for that change — original Harmony times on this box also drift slightly from the older published table.
+Same protocol as the tables below (`max_iter=8`, early stopping off, `lambda=1`, 20 PCs, 4 batches, 2 warmup + 5 repeats, `ncores=4`). Recorded immediately before switching softmax and the objective entropy term to a vectorized `exp`/`ln`. Use these rust columns as the before/after baseline for that change — original Harmony times on this box also drift slightly from the older published table.
 
 #### Default `nclust = min(round(N/30), 100)`
 
@@ -169,9 +169,9 @@ Geometric-mean speedup: **1.92×**.
 
 Geometric-mean speedup: **2.86×**.
 
-### This machine, after vectorized `exp`/`ln`
+### This machine, after vectorized `exp`/`ln` (glibc libmvec via C)
 
-Same protocol and the same binary after softmax / objective entropy call glibc libmvec over contiguous `K × N` rows (AVX-512 8-wide when present, else AVX2). **This-change** speedup is harmorust-before / harmorust-after on this box.
+Same protocol after softmax / objective entropy call glibc libmvec over contiguous `K × N` rows (AVX-512 8-wide when present, else AVX2). That landing needed a C shim because stable Rust cannot pass SIMD types through FFI. **This-change** speedup is harmorust-before / harmorust-after on this box. The next section replaces the C shim with a Rust `std::arch` polynomial (rustc ≥ 1.89).
 
 Default `nclust` geo-mean vs original: **1.68× → 1.99×**. At 8k cells harmorust went **778.2 ms → 692.7 ms** (1.12× on our side).
 
@@ -257,6 +257,6 @@ Same atlas as `harmorust bench`, with `nclust` pinned to biology rather than Har
 
 Geometric-mean speedup: **2.89×** (was 2.58×).
 
-The C++ hot path is already one file and is linked to OpenBLAS. Softmax `exp` and objective entropy `ln` now use libmvec on contiguous rows. Remaining cost is mostly memory layout in the other per-cell loops (assignments, ridge apply) that are still row-strided.
+The C++ hot path is already one file and is linked to OpenBLAS. Softmax `exp` and objective entropy `ln` now use a Rust `std::arch` polynomial on contiguous rows (rustc ≥ 1.89; AVX-512 when present, else AVX2). Remaining cost is mostly memory layout in the other per-cell loops (assignments, ridge apply) that are still row-strided.
 
 `cargo run -p harmorust --release -- bench --cells 4000` still prints a single harmorust wall time.

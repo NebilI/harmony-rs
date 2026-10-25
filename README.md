@@ -83,7 +83,7 @@ Push-only updates to GitHub:
 
 ## Run the Rust kernel
 
-Needs a Rust toolchain (`rustc` ≥ 1.81).
+Needs a Rust toolchain (`rustc` ≥ 1.89).
 
 ```sh
 cargo test -p harmorust
