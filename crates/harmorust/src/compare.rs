@@ -526,7 +526,7 @@ pub fn print_report(report: &CompareReport, json: bool) {
     }
 }
 
-fn write_embeddings_csv(path: &Path, embeddings: &[Vec<f64>]) -> Result<()> {
+pub(crate) fn write_embeddings_csv(path: &Path, embeddings: &[Vec<f64>]) -> Result<()> {
     let mut f = fs::File::create(path).map_err(|e| HarmonyError::msg(e.to_string()))?;
     if embeddings.is_empty() {
         return Err(HarmonyError::msg("empty embedding"));
@@ -545,7 +545,7 @@ fn write_embeddings_csv(path: &Path, embeddings: &[Vec<f64>]) -> Result<()> {
     Ok(())
 }
 
-fn write_batch_csv(path: &Path, batch: &[String]) -> Result<()> {
+pub(crate) fn write_batch_csv(path: &Path, batch: &[String]) -> Result<()> {
     let mut f = fs::File::create(path).map_err(|e| HarmonyError::msg(e.to_string()))?;
     writeln!(f, "batch").map_err(|e| HarmonyError::msg(e.to_string()))?;
     for label in batch {
@@ -554,7 +554,7 @@ fn write_batch_csv(path: &Path, batch: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn r_user_lib() -> Option<PathBuf> {
+pub(crate) fn r_user_lib() -> Option<PathBuf> {
     if let Ok(lib) = std::env::var("R_LIBS_USER") {
         let p = PathBuf::from(lib);
         if p.join("harmony").exists() {

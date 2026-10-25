@@ -17,3 +17,5 @@ jobs:
         run: cargo run -p harmorust --release -- bench --cells 800
       - name: Compare harness smoke
         run: cargo run -p harmorust --release -- compare --cells 80 --repeats 1 --warmup 0 --rust-only
+      - name: Parity command is wired
+        run: cargo run -p harmorust --release -- help 2>&1 | grep -q parity
