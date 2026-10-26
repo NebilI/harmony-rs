@@ -20,6 +20,9 @@ const RAND_MAX: f64 = 2_147_483_647.0;
 pub struct RRng {
     mt: [u32; N],
     mti: usize,
+    /// First element of R's `.Random.seed` (kind encoding). Preserved so we
+    /// can write the advanced state back into the R session.
+    kind_code: i32,
 }
 
 impl RRng {
@@ -36,13 +39,57 @@ impl RRng {
         }
         // First tempered word after the initial twist is discarded; the rest
         // match `runif`.
-        let mut rng = Self { mt, mti: N };
+        let mut rng = Self {
+            mt,
+            mti: N,
+            kind_code: 10403,
+        };
         let _ = rng.next_u32_raw();
         rng
     }
 
     pub fn from_harmony_seed(seed: u64) -> Self {
         Self::set_seed(seed as u32)
+    }
+
+    /// Restore R's `.Random.seed` (length 626: kind, mti, 624 MT words).
+    pub fn from_r_seed(state: &[i32]) -> Result<Self, String> {
+        if state.len() < 626 {
+            return Err(format!(
+                ".Random.seed length {} is not a Mersenne-Twister state (need 626)",
+                state.len()
+            ));
+        }
+        let kind = state[0].rem_euclid(100);
+        if kind != 3 && kind != 7 {
+            return Err(format!(
+                ".Random.seed kind {kind} is not Mersenne-Twister (3)"
+            ));
+        }
+        let mti = state[1] as usize;
+        if mti > N {
+            return Err(format!(".Random.seed mti {mti} out of range"));
+        }
+        let mut mt = [0u32; N];
+        for i in 0..N {
+            mt[i] = state[i + 2] as u32;
+        }
+        Ok(Self {
+            mt,
+            mti,
+            kind_code: state[0],
+        })
+    }
+
+    /// Serialise as R's `.Random.seed` integer vector.
+    pub fn to_r_seed(&self) -> Vec<i32> {
+        let mut s = vec![0i32; 626];
+        s[0] = self.kind_code;
+        s[1] = self.mti as i32;
+        for i in 0..N {
+            s[i + 2] = self.mt[i] as i32;
+        }
+        s
     }
 
     fn twist(&mut self) {
@@ -106,7 +153,12 @@ impl RRng {
         }
         let mut packet: Vec<(i32, usize)> =
             (0..n).map(|i| (self.randi_randmax(), i)).collect();
-        packet.sort_by(|a, b| a.0.cmp(&b.0));
+        // libstdc++ `std::sort` is introsort. Ties are rare (32-bit keys) and
+        // Harmony/RcppArmadillo only compare the key. Rust `sort_by` is a
+        // stable mergesort, so equal keys keep their original index order —
+        // the same as a well-defined (key, index) tie-break and the same as
+        // R's `order()` on distinct keys (the tested path).
+        packet.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         packet.iter().map(|&(_, i)| xs[i].clone()).collect()
     }
 }
@@ -203,5 +255,18 @@ mod tests {
         let mut order: Vec<usize> = (0..8).collect();
         rng.shuffle_cells(&mut order);
         assert_eq!(order, want);
+    }
+
+    #[test]
+    fn r_seed_round_trip_preserves_stream() {
+        let mut a = RRng::set_seed(42);
+        let _ = a.unif();
+        let _ = a.unif();
+        let state = a.to_r_seed();
+        assert_eq!(state.len(), 626);
+        let mut b = RRng::from_r_seed(&state).unwrap();
+        for _ in 0..16 {
+            assert_eq!(a.unif().to_bits(), b.unif().to_bits());
+        }
     }
 }

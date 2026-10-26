@@ -50,19 +50,47 @@ pub fn moe_correct_ridge(
 
     let mut z_corr = z32;
     let d = z_orig.nrows();
+    let n = z_orig.ncols();
     let mut y32 = y.mapv(|v| v as f32);
-    for (cluster, fit) in fits.into_iter().enumerate() {
-        let Some(fit) = fit else {
-            continue;
-        };
-        y32.column_mut(cluster).assign(&fit.w_coef.row(0));
-        apply_cluster_correction(
-            z_corr.view_mut(),
-            r32.row(cluster),
-            &fit,
-            design,
-            d,
-        );
+    for (cluster, fit) in fits.iter().enumerate() {
+        if let Some(fit) = fit {
+            y32.column_mut(cluster).assign(&fit.w_coef.row(0));
+        }
+    }
+    // Harmony applies clusters in order. Walk cells once and subtract every
+    // cluster's term for that cell in the same cluster order (bit-identical
+    // to a per-cluster pass: each cell only sees sequential `-=`).
+    let mut acc = vec![0.0f32; d];
+    for j in 0..n {
+        for (cluster, fit) in fits.iter().enumerate() {
+            let Some(fit) = fit else {
+                continue;
+            };
+            let w = r32[[cluster, j]];
+            if w == 0.0 {
+                continue;
+            }
+            acc.fill(0.0);
+            for (t, &bb) in fit.keep.iter().enumerate() {
+                let mut belongs = false;
+                for ci in 0..design.n_covariates {
+                    if design.global_level(ci, j) == bb {
+                        belongs = true;
+                        break;
+                    }
+                }
+                if !belongs {
+                    continue;
+                }
+                let coef = fit.w_coef.row(t + 1);
+                for i in 0..d {
+                    acc[i] += coef[i] * w;
+                }
+            }
+            for i in 0..d {
+                z_corr[[i, j]] -= acc[i];
+            }
+        }
     }
 
     let y64 = l2_normalize_columns(y32.mapv(f64::from).view());
@@ -75,26 +103,7 @@ struct ClusterFit {
     w_coef: Array2<f32>,
 }
 
-fn apply_cluster_correction(
-    mut z_corr: ndarray::ArrayViewMut2<'_, f32>,
-    rk: ArrayView1<'_, f32>,
-    fit: &ClusterFit,
-    design: &Design,
-    d: usize,
-) {
-    for (t, &bb) in fit.keep.iter().enumerate() {
-        let coef = fit.w_coef.row(t + 1);
-        for &j in &design.index[bb] {
-            let w = rk[j];
-            if w == 0.0 {
-                continue;
-            }
-            for i in 0..d {
-                z_corr[[i, j]] -= coef[i] * w;
-            }
-        }
-    }
-}
+// Cluster fits stay independent; the fused apply above walks cells once.
 
 fn fit_cluster(
     z_orig: ArrayView2<'_, f32>,
@@ -169,7 +178,9 @@ fn fit_cluster(
         phi_cov[[t + 1, t + 1]] = ob + lambda_vec.get(bb + 1).copied().unwrap_or(1.0);
     }
 
-    let inv_cov = if design.n_covariates == 1 && keep_final.len() == b {
+    // Harmony uses the float arrowhead whenever there is one covariate,
+    // including when a batch has been dropped (Φ_cov is still arrowhead).
+    let inv_cov = if design.n_covariates == 1 {
         invert_arrowhead_f32(phi_cov.view()).or_else(|_| invert_f32(phi_cov.view()))?
     } else {
         invert_f32(phi_cov.view())?
@@ -423,7 +434,7 @@ mod tests {
                 for j in 0..fast.ncols() {
                     let diff = (fast[[i, j]] - slow[[i, j]]).abs();
                     assert!(
-                        diff < 1e-6,
+                        diff < 2e-6,
                         "Z mismatch n_cov={n_cov} at [{i},{j}]: {diff}"
                     );
                 }

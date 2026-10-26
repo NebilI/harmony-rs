@@ -1,8 +1,10 @@
 use crate::design::Design;
-use crate::linalg::{cosine_distance, l2_normalize_columns, softmax_neg_dist};
+use crate::linalg::{
+    cosine_distance, euclid2_two_acc, l2_normalize_columns, softmax_neg_dist, zeros_f32_f,
+};
 use crate::r_rng::{ShuffleRng, UnitUniform};
-use crate::vectormath::ln_nonpositive_zero;
 use ndarray::{Array1, Array2, ArrayView2};
+use rayon::prelude::*;
 
 /// Harmony `kmeans_centers`: their k-means++ (`initialize_centroids`) plus
 /// Euclidean Lloyd steps, then one L2 normalise. Matches `utils.cpp` in
@@ -49,27 +51,32 @@ fn initialize_centroids(
 
     let mut taken = vec![false; n];
     for c in 0..k {
+        // Draw the R stream in cell order, then score distances in parallel.
+        let us: Vec<f32> = (0..n).map(|_| rng.unit() as f32).collect();
+        let scores: Vec<f32> = (0..n)
+            .into_par_iter()
+            .map(|j| {
+                let mut sim = 0.0f32;
+                for i in 0..d {
+                    sim += y[[i, c]] * z[[i, j]];
+                }
+                let dist = (2.0 * (1.0 - sim)).abs();
+                if dist == 0.0 {
+                    f32::INFINITY
+                } else {
+                    -us[j].ln() / dist
+                }
+            })
+            .collect();
         let mut best_idx = 0usize;
         let mut best_score = f32::INFINITY;
-        let mut scores = vec![f32::INFINITY; n];
         for j in 0..n {
-            let mut sim = 0.0f32;
-            for i in 0..d {
-                sim += y[[i, c]] * z[[i, j]];
-            }
-            let dist = (2.0 * (1.0 - sim)).abs();
-            let u = rng.unit() as f32;
-            let score = if dist == 0.0 {
-                f32::INFINITY
-            } else {
-                -u.ln() / dist
-            };
-            scores[j] = score;
-            if score < best_score {
-                best_score = score;
+            if scores[j] < best_score {
+                best_score = scores[j];
                 best_idx = j;
             }
         }
+        let mut scores = scores;
         while taken[best_idx] {
             scores[best_idx] = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             best_idx = 0;
@@ -97,31 +104,29 @@ fn euclidean_lloyd_step(
     let d = z.nrows();
     let n = z.ncols();
     let k = y.ncols();
-    let mut y_norm2 = vec![0.0f32; k];
-    for c in 0..k {
-        for i in 0..d {
-            y_norm2[c] += y[[i, c]] * y[[i, c]];
-        }
-    }
     let mut counts = vec![0usize; k];
     let mut last_indx = vec![0usize; k];
     let mut next = Array2::<f32>::zeros((d, k));
+    // Independent per-cell argmin, then sequential accumulate so the
+    // reduction order (and therefore the bits) does not depend on the
+    // thread count.
+    let assign: Vec<usize> = (0..n)
+        .into_par_iter()
+        .map(|j| {
+            let mut best = 0usize;
+            let mut best_d = f32::INFINITY;
+            for c in 0..k {
+                let dval = euclid2_two_acc(|i| z[[i, j]], |i| y[[i, c]], d);
+                if dval < best_d {
+                    best_d = dval;
+                    best = c;
+                }
+            }
+            best
+        })
+        .collect();
     for j in 0..n {
-        let mut best = 0usize;
-        let mut best_d = f32::INFINITY;
-        for c in 0..k {
-            let mut dot = 0.0f32;
-            for i in 0..d {
-                dot += y[[i, c]] * z[[i, j]];
-            }
-            // ||z||^2 is constant across centroids for a fixed cell, so it
-            // cancels in the argmin (same as Armadillo's full Euclidean).
-            let dval = y_norm2[c] - 2.0 * dot;
-            if dval < best_d {
-                best_d = dval;
-                best = c;
-            }
-        }
+        let best = assign[j];
         counts[best] += 1;
         last_indx[best] = j;
         for i in 0..d {
@@ -173,17 +178,85 @@ pub fn observed_expected(
     phi: ArrayView2<'_, f64>,
     pr_b: &[f64],
 ) -> (Array2<f64>, Array2<f64>) {
-    // Harmony: `O = R * Φᵀ`, `E = sum(R,1) * Pr_bᵀ` in float.
+    // Harmony: `O = R * Φᵀ`, `E = sum(R,1) * Pr_bᵀ` in float. Walk each
+    // batch's cell list instead of a dense Φ GEMM.
     let r32 = r.mapv(|v| v as f32);
-    let phi32 = phi.mapv(|v| v as f32);
-    let o32 = r32.dot(&phi32.t());
     let k = r32.nrows();
-    let b = phi32.nrows();
+    let b = phi.nrows();
+    let mut o32 = Array2::<f32>::zeros((k, b));
+    // `phi` is only used for its shape when the caller has a Design; the
+    // index-list path lives on Design. Fall back to a dense scan here so
+    // the function stays usable from tests that pass Φ directly.
+    if b > 0 && r32.ncols() == phi.ncols() {
+        for bb in 0..b {
+            for j in 0..phi.ncols() {
+                if phi[[bb, j]] == 0.0 {
+                    continue;
+                }
+                for i in 0..k {
+                    o32[[i, bb]] += r32[[i, j]];
+                }
+            }
+        }
+    }
     let mut e32 = Array2::<f32>::zeros((k, b));
     for i in 0..k {
-        let rk = r32.row(i).sum();
-        for j in 0..b {
-            e32[[i, j]] = rk * (pr_b[j] as f32);
+        let mut acc1 = 0.0f32;
+        let mut acc2 = 0.0f32;
+        let mut j = 0usize;
+        let n = r32.ncols();
+        while j + 1 < n {
+            acc1 += r32[[i, j]];
+            acc2 += r32[[i, j + 1]];
+            j += 2;
+        }
+        if j < n {
+            acc1 += r32[[i, j]];
+        }
+        let rk = acc1 + acc2;
+        for bb in 0..b {
+            e32[[i, bb]] = rk * (pr_b[bb] as f32);
+        }
+    }
+    (o32.mapv(f64::from), e32.mapv(f64::from))
+}
+
+/// `O`/`E` from `Design::index` (one-hot batches). Same values as
+/// [`observed_expected`] without touching the dense Φ matrix.
+pub fn observed_expected_index(
+    r: ArrayView2<'_, f64>,
+    design: &Design,
+) -> (Array2<f64>, Array2<f64>) {
+    let r32 = r.mapv(|v| v as f32);
+    let k = r32.nrows();
+    let b = design.n_levels;
+    let mut o32 = Array2::<f32>::zeros((k, b));
+    for bb in 0..b {
+        for &j in &design.index[bb] {
+            for i in 0..k {
+                o32[[i, bb]] += r32[[i, j]];
+            }
+        }
+    }
+    let mut e32 = Array2::<f32>::zeros((k, b));
+    for i in 0..k {
+        // Multi-covariate: each cell is in one level *per covariate*, so the
+        // row-sum of O is n_covariates × Σ R. Use Σ R over cells instead.
+        let mut acc1 = 0.0f32;
+        let mut acc2 = 0.0f32;
+        let n = r32.ncols();
+        let mut j = 0usize;
+        while j + 1 < n {
+            acc1 += r32[[i, j]];
+            acc2 += r32[[i, j + 1]];
+            j += 2;
+        }
+        if j < n {
+            acc1 += r32[[i, j]];
+        }
+        let rk = acc1 + acc2;
+        for bb in 0..b {
+            e32[[i, bb]] = rk * (design.pr_b[bb] as f32);
         }
     }
     (o32.mapv(f64::from), e32.mapv(f64::from))
@@ -224,8 +297,9 @@ pub fn update_r(
     let theta32: Vec<f32> = theta.iter().map(|&t| t as f32).collect();
 
     // Physical column shuffle like `R = R.cols(update_order)`.
-    let mut r32 = Array2::<f32>::zeros((k, n));
-    let mut base32 = Array2::<f32>::zeros((k, n));
+    // Column-major so each shuffled cell is contiguous (Armadillo layout).
+    let mut r32 = zeros_f32_f(k, n);
+    let mut base32 = zeros_f32_f(k, n);
     let mut batch_of = vec![0usize; n]; // primary covariate level in shuffled order
     // Multi-covariate: store every covariate's level per shuffled column.
     let mut levels_shuf = vec![vec![0usize; n]; n_cov];
@@ -291,9 +365,8 @@ pub fn update_r(
                 sum += p;
             }
             if sum > 0.0 {
-                let inv = 1.0 / sum;
                 for i in 0..k {
-                    col[i] *= inv;
+                    col[i] /= sum;
                 }
             }
             for i in 0..k {
@@ -346,43 +419,40 @@ pub fn objective(
     let k = r.nrows();
     let b = design.n_levels;
     let n_cov = design.n_covariates;
-    let norm = 2000.0 / n as f64;
+    // Harmony: `const float norm_const = 2000 / (float)N` and `my_accu` over
+    // column-major `R % dist` (cell then cluster).
+    let norm = 2000.0f32 / n as f32;
 
-    // `θ · log((O+E+1)/(2E+1))` depends only on cluster and batch. Harmony
-    // builds this K×B table once; looking it up per cell avoids a `ln` and a
-    // dense scan of Φ for every assignment.
-    let mut log_table = Array2::<f64>::zeros((k, b));
+    let mut log_table = Array2::<f32>::zeros((k, b));
     for i in 0..k {
         for bb in 0..b {
-            let ratio = (o[[i, bb]] + e[[i, bb]] + 1.0) / (2.0 * e[[i, bb]] + 1.0);
-            log_table[[i, bb]] = theta[bb] * ratio.ln();
+            let oib = o[[i, bb]] as f32;
+            let eib = e[[i, bb]] as f32;
+            let ratio = (oib + eib + 1.0) / (2.0 * eib + 1.0);
+            log_table[[i, bb]] = (theta[bb] as f32) * ratio.ln();
         }
     }
 
-    let mut kmeans_error = 0.0;
-    let mut entropy = 0.0;
-    let mut cross = 0.0;
-    let mut ln_row = vec![0.0f64; n];
+    let mut kmeans_error = 0.0f32;
+    let mut entropy = 0.0f32;
+    let mut cross = 0.0f32;
+    let sigma32: Vec<f32> = sigma.iter().map(|&s| s as f32).collect();
 
-    for i in 0..k {
-        let sigma_i = sigma[i];
-        let rrow = r.row(i);
-        let drow = dist.row(i);
-        let rslice = rrow.as_slice().expect("objective R row is contiguous");
-        ln_nonpositive_zero(&mut ln_row, rslice);
-        for j in 0..n {
-            let rij = rslice[j];
-            kmeans_error += rij * drow[j];
-            entropy += rij * ln_row[j] * sigma_i;
-            let mut log_pen = 0.0;
+    for j in 0..n {
+        for i in 0..k {
+            let rij = r[[i, j]] as f32;
+            kmeans_error += rij * (dist[[i, j]] as f32);
+            let ln = if rij > 0.0 { rij.ln() } else { 0.0 };
+            entropy += rij * ln * sigma32[i];
+            let mut log_pen = 0.0f32;
             for ci in 0..n_cov {
                 log_pen += log_table[[i, design.global_level(ci, j)]];
             }
-            cross += rij * sigma_i * log_pen;
+            cross += rij * sigma32[i] * log_pen;
         }
     }
 
-    (kmeans_error + entropy + cross) * norm
+    f64::from((kmeans_error + entropy + cross) * norm)
 }
 
 #[cfg(test)]
@@ -619,32 +689,34 @@ mod tests {
         theta: &[f64],
         sigma: &Array1<f64>,
     ) -> f64 {
-        let n = r.ncols() as f64;
+        let n = r.ncols();
         let k = r.nrows();
         let b = phi.nrows();
-        let norm = 2000.0 / n;
-        let mut kmeans_error = 0.0;
-        let mut entropy = 0.0;
-        let mut cross = 0.0;
-        for i in 0..k {
-            for j in 0..r.ncols() {
-                let rij = r[[i, j]];
-                kmeans_error += rij * dist[[i, j]];
+        let norm = 2000.0f32 / n as f32;
+        let mut kmeans_error = 0.0f32;
+        let mut entropy = 0.0f32;
+        let mut cross = 0.0f32;
+        for j in 0..n {
+            for i in 0..k {
+                let rij = r[[i, j]] as f32;
+                kmeans_error += rij * (dist[[i, j]] as f32);
                 if rij > 0.0 {
-                    entropy += rij * rij.ln() * sigma[i];
+                    entropy += rij * rij.ln() * (sigma[i] as f32);
                 }
-                let mut log_pen = 0.0;
+                let mut log_pen = 0.0f32;
                 for bb in 0..b {
                     if phi[[bb, j]] == 0.0 {
                         continue;
                     }
-                    let ratio = (o[[i, bb]] + e[[i, bb]] + 1.0) / (2.0 * e[[i, bb]] + 1.0);
-                    log_pen += theta[bb] * ratio.ln();
+                    let oib = o[[i, bb]] as f32;
+                    let eib = e[[i, bb]] as f32;
+                    let ratio = (oib + eib + 1.0) / (2.0 * eib + 1.0);
+                    log_pen += (theta[bb] as f32) * ratio.ln();
                 }
-                cross += rij * sigma[i] * log_pen;
+                cross += rij * (sigma[i] as f32) * log_pen;
             }
         }
-        (kmeans_error + entropy + cross) * norm
+        f64::from((kmeans_error + entropy + cross) * norm)
     }
 
     #[test]

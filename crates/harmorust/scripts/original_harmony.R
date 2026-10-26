@@ -47,7 +47,11 @@ ncores <- as.integer(kv$ncores)
 early_stop <- as.logical(kv[["early-stop"]])
 theta <- as.numeric(kv$theta)
 sigma <- as.numeric(kv$sigma)
-lambda <- as.numeric(kv$lambda)
+lambda <- if (identical(kv$lambda, "auto") || identical(kv$lambda, "NULL")) {
+  NULL
+} else {
+  as.numeric(kv$lambda)
+}
 max_iter_cluster <- as.integer(kv[["max-iter-cluster"]])
 seed <- as.integer(kv$seed)
 out_path <- kv$out

@@ -1,7 +1,8 @@
+use harmorust::binio::{read_request, write_response};
 use harmorust::compare::{print_report, run_compare, CompareOptions, CompareProtocol};
 use harmorust::parity::{
-    assert_parity_within, fmt_sci, print_report as print_parity_report, run_parity, ParityOptions,
-    ParityProtocol, PARITY_MAX_ABS,
+    assert_parity_within, fmt_sci, parity_max_abs, print_report as print_parity_report, run_parity,
+    ParityOptions, ParityProtocol,
 };
 use harmorust::{
     embeddings_from_rows, evaluate, run_harmony, run_harmony_multi, simulate_atlas, HarmonyConfig,
@@ -47,6 +48,9 @@ struct RunResponse {
     r: Vec<Vec<f64>>,
     y: Vec<Vec<f64>>,
     o: Vec<Vec<f64>>,
+    e: Vec<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rng_state: Option<Vec<i32>>,
     n_iter: usize,
     converged: bool,
     n_clusters: usize,
@@ -64,6 +68,8 @@ impl From<HarmonyResult> for RunResponse {
             r: result.r,
             y: result.y,
             o: result.o,
+            e: result.e,
+            rng_state: result.rng_state,
             n_iter: result.n_iter,
             converged: result.converged,
             n_clusters: result.n_clusters,
@@ -95,6 +101,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut stdout = std::io::stdout();
             serde_json::to_writer(&mut stdout, &out)?;
             stdout.write_all(b"\n")?;
+        }
+        "run-bin" => {
+            let stdin = std::io::stdin();
+            let (header, embeddings) = read_request(stdin.lock())?;
+            let req = RunRequest {
+                embeddings,
+                batch: None,
+                covariates: Some(header.covariates),
+                cell_type: header.cell_type,
+                theta: header.theta.map(NumList::Vec),
+                lambda: header.lambda.map(NumList::Vec),
+                config: header.config,
+            };
+            let out = integrate(&req)?;
+            let result = HarmonyResult {
+                embeddings: out.embeddings,
+                r: out.r,
+                y: out.y,
+                o: out.o,
+                e: out.e,
+                rng_state: out.rng_state,
+                n_iter: out.n_iter,
+                converged: out.converged,
+                n_clusters: out.n_clusters,
+                objective: out.objective,
+                objective_kmeans: out.objective_kmeans,
+                kmeans_rounds: out.kmeans_rounds,
+            };
+            write_response(std::io::stdout().lock(), &result)?;
         }
         "demo" => {
             let mut cells = 600usize;
@@ -203,6 +238,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "--rust-only" => opts.rust_only = true,
                     "--json" => json = true,
                     "--early-stop" => protocol.early_stop = true,
+                    "--lambda" => {
+                        let raw = args.next().ok_or("missing --lambda")?;
+                        if raw == "auto" {
+                            protocol.auto_lambda = true;
+                        } else {
+                            protocol.lambda = raw.parse()?;
+                            protocol.auto_lambda = false;
+                        }
+                    }
+                    "--via-r-package" => opts.via_r_package = true,
+                    "--extended" => {
+                        protocol = CompareProtocol::extended();
+                    }
                     other => return Err(format!("unknown flag {other}").into()),
                 }
             }
@@ -270,7 +318,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if !json {
                     eprintln!(
                         "parity gate passed: gated max |Δ| ≤ {}",
-                        fmt_sci(PARITY_MAX_ABS)
+                        fmt_sci(parity_max_abs())
                     );
                 }
             }
@@ -279,6 +327,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("harmorust — Rust Harmony (seurust-style kernel port)\n");
             eprintln!("Usage:");
             eprintln!("  harmorust run < request.json");
+            eprintln!("  harmorust run-bin < request.bin");
             eprintln!("  harmorust demo [--cells N] [--batch-strength S] [--seed SEED]");
             eprintln!("  harmorust bench [--cells N]");
             eprintln!("  harmorust compare [--cells N,N,...] [--warmup W] [--repeats R] [--ncores N]");
