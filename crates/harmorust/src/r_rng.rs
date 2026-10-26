@@ -2,7 +2,9 @@
 //!
 //! Harmony draws `arma::fill::randu` through R's `unif_rand`. Matching that
 //! stream is what lets k-means++ land on the same cells as CRAN Harmony when
-//! both sides are given the same integer seed.
+//! both sides are given the same integer seed. Block shuffles continue from
+//! the same stream and use Armadillo's argsort-of-randi `shuffle`, not
+//! Fisher–Yates.
 
 const N: usize = 624;
 const M: usize = 397;
@@ -10,6 +12,8 @@ const MATRIX_A: u32 = 0x9908_b0df;
 const UPPER: u32 = 0x8000_0000;
 const LOWER: u32 = 0x7fff_ffff;
 const I2_32: f64 = 1.0 / 4_294_967_296.0;
+/// glibc / this R build's `RAND_MAX` (also `.Machine$integer.max`).
+const RAND_MAX: f64 = 2_147_483_647.0;
 
 /// R `Mersenne-Twister` after `set.seed(seed)`.
 #[derive(Clone, Debug)]
@@ -86,14 +90,24 @@ impl RRng {
         j.min(n - 1)
     }
 
-    /// Armadillo / RcppArmadillo `shuffle`: `j = i + floor(U*(n-i))`.
-    pub fn shuffle<T>(&mut self, xs: &mut [T]) {
+    /// `static_cast<int>(Rf_runif(0, RAND_MAX))` as used by RcppArmadillo's
+    /// `arma_rng_alt::randi_val` / `randi_fill`.
+    pub fn randi_randmax(&mut self) -> i32 {
+        (self.unif() * RAND_MAX) as i32
+    }
+
+    /// Armadillo out-of-place `shuffle` on a vector (`op_shuffle_meat.hpp`):
+    /// draw `N` randi keys in `[0, RAND_MAX]`, argsort ascending, then
+    /// `out[i] = xs[packet[i].index]`.
+    pub fn shuffle_gather<T: Clone>(&mut self, xs: &[T]) -> Vec<T> {
         let n = xs.len();
-        for i in 0..n {
-            let span = n - i;
-            let j = i + self.index(span);
-            xs.swap(i, j);
+        if n <= 1 {
+            return xs.to_vec();
         }
+        let mut packet: Vec<(i32, usize)> =
+            (0..n).map(|i| (self.randi_randmax(), i)).collect();
+        packet.sort_by(|a, b| a.0.cmp(&b.0));
+        packet.iter().map(|&(_, i)| xs[i].clone()).collect()
     }
 }
 
@@ -104,7 +118,8 @@ pub trait ShuffleRng {
 
 impl ShuffleRng for RRng {
     fn shuffle_cells(&mut self, order: &mut [usize]) {
-        self.shuffle(order);
+        let shuffled = self.shuffle_gather(order);
+        order.copy_from_slice(&shuffled);
     }
 }
 
@@ -115,14 +130,26 @@ impl ShuffleRng for rand_chacha::ChaCha8Rng {
     }
 }
 
-/// Uniform-(0, 1) source used by Harmony-style k-means++.
+/// Uniform-(0, 1) source used by Harmony-style k-means++ / Armadillo Lloyd.
 pub trait UnitUniform {
     fn unit(&mut self) -> f64;
+    /// `floor(U * n)` in `0..n`, matching Armadillo `randi` / `randu` integer draws.
+    fn index(&mut self, n: usize) -> usize {
+        if n == 0 {
+            return 0;
+        }
+        let j = (self.unit() * n as f64).floor() as usize;
+        j.min(n - 1)
+    }
 }
 
 impl UnitUniform for RRng {
     fn unit(&mut self) -> f64 {
         self.unif()
+    }
+
+    fn index(&mut self, n: usize) -> usize {
+        RRng::index(self, n)
     }
 }
 
@@ -165,5 +192,16 @@ mod tests {
             let g = rng.unif();
             assert!((g - w).abs() < 1e-15, "runif {g} vs {w}");
         }
+    }
+
+    #[test]
+    fn armadillo_style_shuffle_matches_r_argsort_of_randi() {
+        // set.seed(1); keys <- as.integer(runif(8, 0, .Machine$integer.max));
+        // order(keys) - 1  →  4,0,1,2,7,5,3,6
+        let want = [4usize, 0, 1, 2, 7, 5, 3, 6];
+        let mut rng = RRng::set_seed(1);
+        let mut order: Vec<usize> = (0..8).collect();
+        rng.shuffle_cells(&mut order);
+        assert_eq!(order, want);
     }
 }

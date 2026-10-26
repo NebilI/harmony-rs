@@ -87,6 +87,63 @@ pub fn invert(a: ArrayView2<'_, f64>) -> Result<Array2<f64>> {
     Ok(m.slice(s![.., n..]).to_owned())
 }
 
+/// Gauss–Jordan inverse in `float`, matching Harmony's single-precision ridge.
+pub fn invert_f32(a: ArrayView2<'_, f32>) -> Result<Array2<f32>> {
+    let n = a.nrows();
+    if n != a.ncols() {
+        return Err(HarmonyError::msg("invert: matrix is not square"));
+    }
+    let mut m = Array2::<f32>::zeros((n, 2 * n));
+    for i in 0..n {
+        for j in 0..n {
+            m[[i, j]] = a[[i, j]];
+        }
+        m[[i, n + i]] = 1.0;
+    }
+
+    for col in 0..n {
+        let mut pivot = col;
+        let mut best = m[[col, col]].abs();
+        for r in (col + 1)..n {
+            let v = m[[r, col]].abs();
+            if v > best {
+                best = v;
+                pivot = r;
+            }
+        }
+        if best < 1e-18 {
+            return Err(HarmonyError::msg(
+                "ridge covariance is singular; try a larger lambda",
+            ));
+        }
+        if pivot != col {
+            for j in 0..(2 * n) {
+                let tmp = m[[col, j]];
+                m[[col, j]] = m[[pivot, j]];
+                m[[pivot, j]] = tmp;
+            }
+        }
+        let diag = m[[col, col]];
+        for j in col..(2 * n) {
+            m[[col, j]] /= diag;
+        }
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let f = m[[r, col]];
+            if f == 0.0 {
+                continue;
+            }
+            for j in col..(2 * n) {
+                m[[r, j]] -= f * m[[col, j]];
+            }
+        }
+    }
+
+    Ok(m.slice(s![.., n..]).to_owned())
+}
+
 /// Arrowhead inverse used by Harmony2 for a single covariate.
 ///
 /// `phi_cov` is (B+1) x (B+1) with intercept in row/col 0 and a diagonal
@@ -120,6 +177,45 @@ pub fn invert_arrowhead(phi_cov: ArrayView2<'_, f64>) -> Result<Array2<f64>> {
         ac_b[i] = ac[i] * b[i];
     }
     let mut inv = Array2::<f64>::zeros((n, n));
+    for i in 0..n {
+        for j in 0..n {
+            inv[[i, j]] = ac_b[i] * ac_b[j] / u;
+        }
+        inv[[i, i]] += b[i];
+    }
+    Ok(inv)
+}
+
+/// Harmony's float arrowhead inverse (`moe_correct_ridge_cpp`).
+pub fn invert_arrowhead_f32(phi_cov: ArrayView2<'_, f32>) -> Result<Array2<f32>> {
+    let n = phi_cov.nrows();
+    let mut ac = Array1::<f32>::zeros(n);
+    ac[0] = 1.0;
+    for i in 1..n {
+        ac[i] = -phi_cov[[0, i]];
+    }
+    let b0 = phi_cov[[0, 0]];
+    let mut b = Array1::<f32>::zeros(n);
+    for i in 1..n {
+        let d = phi_cov[[i, i]];
+        if d.abs() < 1e-18 {
+            return invert_f32(phi_cov);
+        }
+        b[i] = 1.0 / d;
+    }
+    let mut u = b0;
+    for i in 1..n {
+        u -= ac[i] * ac[i] * b[i];
+    }
+    if u.abs() < 1e-18 {
+        return invert_f32(phi_cov);
+    }
+    let mut ac_b = Array1::<f32>::zeros(n);
+    ac_b[0] = 1.0;
+    for i in 1..n {
+        ac_b[i] = ac[i] * b[i];
+    }
+    let mut inv = Array2::<f32>::zeros((n, n));
     for i in 0..n {
         for j in 0..n {
             inv[[i, j]] = ac_b[i] * ac_b[j] / u;
