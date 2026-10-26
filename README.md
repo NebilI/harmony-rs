@@ -121,24 +121,22 @@ cargo run -p harmorust --release -- parity --cells 200,500,1000 --nclust 1,5
 
 Compared fields: corrected `embeddings`, cluster-aligned `R` / `Y` / `O`, the outer-round `objective`, and `moe_correct_ridge` (harmorust’s ridge applied to Harmony’s final `R`, vs Harmony `Z_corr`). Same embeddings and hyperparameters as `compare` (`max_iter=8`, early stopping off, `lambda=1`, 20 PCs, 4 batches). Measured against Harmony 2.0.5.
 
-**`nclust = 1` (ridge only)** — no clustering ambiguity. Some embedding entries now match exactly. Max stays around `3e-05` from float GEMM vs our index-walk ridge. `R` and `O` match to `0` or `1.1102e-16`.
+**`nclust = 1` (ridge only)** — no clustering ambiguity. Some embedding entries match exactly. Max stays around `3e-05` from float GEMM vs our index-walk ridge. `R` matches to `0`.
 
 | Case | Field | Elements | min \|Δ\| | max \|Δ\| |
 | --- | --- | ---: | ---: | ---: |
-| atlas-200 | embeddings | 4000 | 0.0000e+00 | 5.2899e-06 |
-| atlas-500 | embeddings | 10000 | 0.0000e+00 | 2.9922e-05 |
-| atlas-1000 | embeddings | 20000 | 0.0000e+00 | 3.0100e-05 |
+| atlas-200 | embeddings | 4000 | 0.0000e+00 | 4.0531e-06 |
+| atlas-500 | embeddings | 10000 | 0.0000e+00 | 3.1114e-05 |
 
-**`nclust = 5` (full Harmony loop)** — matching Harmony's k-means++ and R's `runif` cut the old 200-cell O(1) gap (`R` max ≈ 1) to `~3e-02`. 500-cell embeddings stay near `3e-05`. Ridge on Harmony’s `R` is still `≤1e-04`.
+**`nclust = 5` (full Harmony loop)** — float Lloyd + Armadillo argsort shuffle bring 500-cell embeddings to `~3e-05`. The 200-cell case still sees `~1e-02` from online multi-block `update_R` float drift. Ridge on Harmony’s `R` stays `≤2e-05`.
 
 | Case | Field | min \|Δ\| | max \|Δ\| |
 | --- | --- | ---: | ---: |
-| atlas-200 | embeddings | 0.0000e+00 | 3.4487e-02 |
-| atlas-200 | moe_correct_ridge | 0.0000e+00 | 9.7752e-06 |
-| atlas-500 | embeddings | 0.0000e+00 | 3.4332e-05 |
-| atlas-1000 | embeddings | 1.4901e-08 | 1.7810e-04 |
+| atlas-200 | embeddings | 0.0000e+00 | 1.0746e-02 |
+| atlas-200 | moe_correct_ridge | 0.0000e+00 | 1.6451e-05 |
+| atlas-500 | embeddings | 0.0000e+00 | 3.4571e-05 |
 
-The remaining `3e-02` on the 200-cell / 5-cluster case is Armadillo Lloyd + block shuffle, not the ridge. Full tables, including aligned `R` / `Y` / `O`, are in [PARITY.md](PARITY.md).
+Full tables, including aligned `R` / `Y` / `O`, are in [PARITY.md](PARITY.md).
 
 ### Pull-request gate
 

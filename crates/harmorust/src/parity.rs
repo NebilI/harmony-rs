@@ -1,13 +1,14 @@
-//! Numerical comparison of harmorust (`f64`) vs immunogenomics/harmony (C++ `float`).
+//! Numerical comparison of harmorust vs immunogenomics/harmony (C++ `float`).
 //!
 //! The existing `compare` command reports wall time. This module runs both
 //! kernels on the same synthetic atlas and reports the element-wise absolute
 //! difference of each result matrix: min and max in scientific notation.
 //!
-//! Harmony C++ stores the loop in `float`. Differences therefore mix rounding
-//! with independent k-means++ / block shuffles. `nclust = 1` isolates the
-//! ridge (no clustering ambiguity). Soft-assignment matrices `R`, `Y`, `O`,
-//! and `E` are compared after a greedy cluster alignment on `Y`.
+//! Both sides run the loop in `float`. Remaining `|Δ|` is mostly OpenBLAS
+//! float GEMM vs our index-walk ridge, plus online multi-block `update_R`
+//! drift on tiny multi-cluster atlases. `nclust = 1` isolates the ridge.
+//! Soft-assignment matrices `R`, `Y`, `O`, and `E` are compared after a
+//! greedy cluster alignment on `Y`.
 //!
 //! `PARITY_MAX_ABS` is the pull-request gate: any gated field whose max
 //! `|Δ|` exceeds that ceiling fails `cargo test` (when CRAN harmony is
@@ -47,7 +48,8 @@ pub fn field_is_gated(name: &str) -> bool {
 ///
 /// `objective` traces are skipped (they accumulate inner rounds). End-to-end
 /// `R` / `Y` / `O` / embeddings on `nclust > 1` with fewer than 400 cells are
-/// skipped until Armadillo Lloyd matches; `moe_correct_ridge` stays gated.
+/// skipped until online multi-block `update_R` matches Harmony's float path
+/// more tightly; `moe_correct_ridge` stays gated.
 pub fn field_limit(n_clusters: usize, n_cells: usize, field: &str) -> Option<f64> {
     if !field_is_gated(field) {
         return None;
@@ -141,6 +143,9 @@ impl Default for ParityProtocol {
                 cell_counts: vec![200, 500, 1000],
                 warmup: 0,
                 repeats: 1,
+                // Single-thread so Armadillo Lloyd / OpenBLAS match our serial
+                // float path (OpenMP last_indx and float reductions otherwise drift).
+                ncores: 1,
                 ..CompareProtocol::default()
             },
             nclusts: vec![Some(1), Some(5)],
@@ -160,6 +165,7 @@ impl ParityProtocol {
                 cell_counts: vec![200, 500],
                 warmup: 0,
                 repeats: 1,
+                ncores: 1,
                 ..CompareProtocol::default()
             },
             nclusts: vec![Some(1), Some(5)],

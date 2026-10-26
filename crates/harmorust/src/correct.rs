@@ -1,6 +1,6 @@
 use crate::design::Design;
 use crate::error::Result;
-use crate::linalg::{invert, invert_arrowhead, l2_normalize_columns};
+use crate::linalg::{invert_arrowhead_f32, invert_f32, l2_normalize_columns};
 use ndarray::{Array2, ArrayView1, ArrayView2};
 use rayon::prelude::*;
 
@@ -144,35 +144,40 @@ fn fit_cluster(
         return Ok(None);
     }
 
-    let lambda_vec = match lambda {
-        Some(l) => l.to_vec(),
+    // Harmony builds Φ_cov / RHS / inv in `float` (OpenBLAS sgetrf or the
+    // analytic arrowhead). Stay in f32 end-to-end so |Δ| is only residual
+    // GEMM accumulation order, not a float↔f64 type gap.
+    let lambda_vec: Vec<f32> = match lambda {
+        Some(l) => l.iter().map(|&v| v as f32).collect(),
         None => {
-            let mut v = vec![0.0];
+            let mut v = vec![0.0f32];
             for bb in 0..b {
-                v.push(alpha * f64::from(e_row[bb]));
+                v.push((alpha as f32) * e_row[bb]);
             }
             v
         }
     };
 
     let m = keep_final.len() + 1;
-    let mut phi_cov = Array2::<f64>::zeros((m, m));
-    let r_sum = f64::from(rk.sum());
+    let mut phi_cov = Array2::<f32>::zeros((m, m));
+    let r_sum = rk.sum();
     phi_cov[[0, 0]] = r_sum + lambda_vec[0];
     for (t, &bb) in keep_final.iter().enumerate() {
-        let ob = f64::from(o_row[bb]);
+        let ob = o_row[bb];
         phi_cov[[0, t + 1]] = ob;
         phi_cov[[t + 1, 0]] = ob;
         phi_cov[[t + 1, t + 1]] = ob + lambda_vec.get(bb + 1).copied().unwrap_or(1.0);
     }
 
     let inv_cov = if design.n_covariates == 1 && keep_final.len() == b {
-        invert_arrowhead(phi_cov.view()).or_else(|_| invert(phi_cov.view()))?
+        invert_arrowhead_f32(phi_cov.view()).or_else(|_| invert_f32(phi_cov.view()))?
     } else {
-        invert(phi_cov.view())?
+        invert_f32(phi_cov.view())?
     };
 
-    let mut rhs = Array2::<f64>::zeros((m, d));
+    // Match Harmony: scale Z columns by R_k, sum per batch (cell index order),
+    // intercept = total sum (or sum of batch RHSs for a full one-hot partition).
+    let mut rhs = Array2::<f32>::zeros((m, d));
     for (t, &bb) in keep_final.iter().enumerate() {
         for &j in &design.index[bb] {
             let w = rk[j];
@@ -180,25 +185,31 @@ fn fit_cluster(
                 continue;
             }
             for i in 0..d {
-                rhs[[t + 1, i]] += f64::from(w * z_orig[[i, j]]);
+                rhs[[t + 1, i]] += w * z_orig[[i, j]];
             }
         }
     }
     if design.n_covariates == 1 && keep_final.len() == b {
-        // One-hot batches partition the cells, so the intercept is the sum of
-        // the per-batch right-hand sides.
         for t in 0..keep_final.len() {
             for i in 0..d {
                 rhs[[0, i]] += rhs[[t + 1, i]];
             }
         }
     } else {
-        rhs.row_mut(0).assign(&z_orig.dot(&rk).mapv(f64::from));
+        for j in 0..rk.len() {
+            let w = rk[j];
+            if w == 0.0 {
+                continue;
+            }
+            for i in 0..d {
+                rhs[[0, i]] += w * z_orig[[i, j]];
+            }
+        }
     }
 
     Ok(Some(ClusterFit {
         keep: keep_final,
-        w_coef: inv_cov.dot(&rhs).mapv(|v| v as f32),
+        w_coef: inv_cov.dot(&rhs),
     }))
 }
 
@@ -214,7 +225,7 @@ mod tests {
     use crate::cluster::{init_r, kmeans_cosine, observed_expected};
     use crate::design::encode_covariates;
     use crate::harmony::embeddings_from_rows;
-    use crate::linalg::l2_normalize_columns;
+    use crate::linalg::{invert, l2_normalize_columns};
     use crate::simulate::{simulate_atlas, SimulateSpec};
     use ndarray::Array1;
     use rand::SeedableRng;

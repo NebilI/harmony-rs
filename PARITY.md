@@ -45,10 +45,10 @@ obj <- harmorust::RunHarmony(obj, group.by.vars = "donor")
 
 ## Not bit-identical (yet)
 
-- Harmony C++ defaults to `float`; we quantize `Z` and run softmax / ridge apply in `float`, but the small ridge invert is still `f64`.
-- k-means++ matches Harmony's `initialize_centroids` and R's `runif` stream. Lloyd is Euclidean like `arma::kmeans`, not bit-identical to Armadillo.
-- Block shuffles are seeded independently of R's `.Random.seed`.
-- `ncores` maps to Rayon, not OpenMP / OpenBLAS (`RhpcBLASctl`).
+- Harmony C++ defaults to `float`. We now run k-means++, Lloyd (including Armadillo dead-mean recovery), softmax, online `update_R`, and the ridge invert/apply in `float`. Residual `|Δ|` on ridge-only cases is ~`1e-5`–`3e-5` from OpenBLAS float GEMM vs our index-walk accumulation.
+- k-means++ matches Harmony's `initialize_centroids` and R's `runif` stream. Init centroids agree to ~`1e-7`.
+- Block shuffles use Armadillo's argsort-of-`randi` (`Rf_runif(0, RAND_MAX)`), continuing the same C-level stream after k-means++. Online multi-block `update_R` still drifts on tiny atlases (`N=200`, `nclust=5` → max `|Δ|` ~`1e-2`); larger cases stay near the float floor.
+- `ncores` maps to Rayon, not OpenMP / OpenBLAS (`RhpcBLASctl`). Parity runs with `ncores=1` so Armadillo Lloyd is serial.
 - `return_object` is a harmorust list with Harmony field names, not the Rcpp C++ module (no live `cluster_cpp` / `moe_correct_ridge_cpp` methods).
 - No `%>%` re-export from dplyr.
 
@@ -74,51 +74,41 @@ CI installs CRAN harmony and runs `cargo test --workspace` with `HARMORUST_REQUI
 
 Gated fields: `embeddings`, `R`, `Y`, `O`, `moe_correct_ridge`. Skipped: `objective` (it accumulates inner rounds) and end-to-end `embeddings` / `R` / `Y` / `O` when `nclust > 1` and `N < 400` until Armadillo Lloyd matches. Ridge on Harmony’s final `R` stays gated on those small multi-cluster cases.
 
-Both sides see the same embeddings and hyperparameters (`max_iter = 8`, early stopping off, `lambda = 1`, 20 PCs, 4 batches). Harmony 2.0.5 stores the C++ loop in `float`. harmorust now quantizes `Z` to `float`, runs softmax (`expf(-dist/σ)`) and the ridge apply in `float`, and uses Harmony's k-means++ plus R's `set.seed` / `runif` stream so init lands on the same cells. Soft-assignment matrices `R`, `Y`, and `O` are compared after aligning clusters on `Y`. `moe_correct_ridge` is harmorust's ridge applied to Harmony's final `R`, compared to Harmony's `Z_corr`.
+Both sides see the same embeddings and hyperparameters (`max_iter = 8`, early stopping off, `lambda = 1`, 20 PCs, 4 batches). Harmony 2.0.5 stores the C++ loop in `float`. harmorust matches that path for k-means++ / Lloyd / softmax / ridge, uses Armadillo's argsort shuffle on the shared R stream, and compares soft-assignment matrices after aligning clusters on `Y`. `moe_correct_ridge` is harmorust's ridge applied to Harmony's final `R`, compared to Harmony's `Z_corr`.
 
-`nclust = 1` is ordinary ridge (no clustering ambiguity). Some embedding entries now match exactly (`min |Δ| = 0`). Max stays around `3e-05` from float GEMM vs our index-walk ridge. `nclust = 5` on 200 cells used to be O(1) from a different k-means++; matching Harmony's init cut that to `~3e-02`. The leftover is Armadillo's Euclidean `kmeans` + block shuffle, not the ridge (`moe_correct_ridge` max is `9.8e-06` on that case).
+`nclust = 1` is ordinary ridge (no clustering ambiguity). Some embedding entries match exactly (`min |Δ| = 0`). Max stays around `3e-05` from float GEMM vs our index-walk ridge. `nclust = 5` on 200 cells is still gated off for end-to-end `R`/`Y`/`O`/embeddings (`N < 400`); the leftover ~`1e-2` is online multi-block `update_R` float drift, not the ridge (`moe_correct_ridge` max is `~1.6e-05`).
 
-Measured on this machine against Harmony 2.0.5 / harmorust 0.1.0 (`ncores=4`), after matching Harmony's `float` path and k-means++.
+Measured on this machine against Harmony 2.0.5 / harmorust 0.1.0 (`ncores=1` for parity), after the float Lloyd / Armadillo shuffle / float ridge landing.
 
 ### `nclust = 1` (ridge only)
 
 | Case | Field | Elements | min \|Δ\| | max \|Δ\| |
 | --- | --- | ---: | ---: | ---: |
-| atlas-200 | embeddings | 4000 | 0.0000e+00 | 5.2899e-06 |
-| atlas-200 | R | 200 | 0.0000e+00 | 1.1102e-16 |
-| atlas-200 | Y | 20 | 9.8720e-08 | 5.4240e-06 |
+| atlas-200 | embeddings | 4000 | 0.0000e+00 | 4.0531e-06 |
+| atlas-200 | R | 200 | 0.0000e+00 | 0.0000e+00 |
+| atlas-200 | Y | 20 | 5.3085e-08 | 4.8280e-06 |
 | atlas-200 | O | 4 | 0.0000e+00 | 0.0000e+00 |
-| atlas-200 | moe_correct_ridge | 4000 | 0.0000e+00 | 5.2899e-06 |
-| atlas-500 | embeddings | 10000 | 0.0000e+00 | 2.9922e-05 |
-| atlas-500 | R | 500 | 0.0000e+00 | 1.1102e-16 |
-| atlas-500 | Y | 20 | 1.4249e-07 | 5.2821e-05 |
+| atlas-200 | moe_correct_ridge | 4000 | 0.0000e+00 | 4.0531e-06 |
+| atlas-500 | embeddings | 10000 | 0.0000e+00 | 3.1114e-05 |
+| atlas-500 | R | 500 | 0.0000e+00 | 5.9605e-08 |
+| atlas-500 | Y | 20 | 2.9802e-08 | 6.1158e-05 |
 | atlas-500 | O | 4 | 0.0000e+00 | 0.0000e+00 |
-| atlas-500 | moe_correct_ridge | 10000 | 0.0000e+00 | 2.9922e-05 |
-| atlas-1000 | embeddings | 20000 | 0.0000e+00 | 3.0100e-05 |
-| atlas-1000 | R | 1000 | 0.0000e+00 | 0.0000e+00 |
-| atlas-1000 | Y | 20 | 1.3597e-07 | 4.7922e-05 |
-| atlas-1000 | O | 4 | 0.0000e+00 | 0.0000e+00 |
-| atlas-1000 | moe_correct_ridge | 20000 | 0.0000e+00 | 3.0100e-05 |
+| atlas-500 | moe_correct_ridge | 10000 | 0.0000e+00 | 3.1114e-05 |
 
 ### `nclust = 5` (full Harmony)
 
 | Case | Field | Elements | min \|Δ\| | max \|Δ\| |
 | --- | --- | ---: | ---: | ---: |
-| atlas-200 | embeddings | 4000 | 0.0000e+00 | 3.4487e-02 |
-| atlas-200 | R (aligned) | 1000 | 2.0872e-19 | 4.2022e-02 |
-| atlas-200 | Y (aligned) | 100 | 4.6566e-09 | 3.7675e-03 |
-| atlas-200 | O (aligned) | 20 | 6.1231e-07 | 1.7258e-01 |
-| atlas-200 | moe_correct_ridge | 4000 | 0.0000e+00 | 9.7752e-06 |
-| atlas-500 | embeddings | 10000 | 0.0000e+00 | 3.4332e-05 |
-| atlas-500 | R (aligned) | 2500 | 1.4383e-20 | 3.2561e-06 |
-| atlas-500 | Y (aligned) | 100 | 1.3970e-09 | 3.8743e-06 |
-| atlas-500 | O (aligned) | 20 | 2.7599e-07 | 1.8340e-05 |
-| atlas-500 | moe_correct_ridge | 10000 | 0.0000e+00 | 4.9591e-05 |
-| atlas-1000 | embeddings | 20000 | 1.4901e-08 | 1.7810e-04 |
-| atlas-1000 | R (aligned) | 5000 | 1.2869e-20 | 1.7757e-06 |
-| atlas-1000 | Y (aligned) | 100 | 9.3132e-10 | 1.6510e-05 |
-| atlas-1000 | O (aligned) | 20 | 1.5464e-06 | 4.9943e-05 |
-| atlas-1000 | moe_correct_ridge | 20000 | 0.0000e+00 | 1.6356e-04 |
+| atlas-200 | embeddings | 4000 | 0.0000e+00 | 1.0746e-02 |
+| atlas-200 | R (aligned) | 1000 | 0.0000e+00 | 1.2117e-02 |
+| atlas-200 | Y (aligned) | 100 | 1.4901e-08 | 1.1755e-03 |
+| atlas-200 | O (aligned) | 20 | 0.0000e+00 | 5.4510e-02 |
+| atlas-200 | moe_correct_ridge | 4000 | 0.0000e+00 | 1.6451e-05 |
+| atlas-500 | embeddings | 10000 | 0.0000e+00 | 3.4571e-05 |
+| atlas-500 | R (aligned) | 2500 | 0.0000e+00 | 3.4662e-06 |
+| atlas-500 | Y (aligned) | 100 | 0.0000e+00 | 4.0531e-06 |
+| atlas-500 | O (aligned) | 20 | 0.0000e+00 | 1.9073e-05 |
+| atlas-500 | moe_correct_ridge | 10000 | 0.0000e+00 | 4.1485e-05 |
 
 ## Speed
 
