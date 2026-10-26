@@ -6,8 +6,6 @@ use crate::error::{HarmonyError, Result};
 use crate::linalg::{l2_normalize_columns, softmax_neg_dist};
 use crate::r_rng::RRng;
 use ndarray::{Array1, Array2, ArrayView2};
-use rand::SeedableRng;
-use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +45,11 @@ pub struct HarmonyState {
     pub objective_kmeans: Vec<f64>,
     pub objective_harmony: Vec<f64>,
     pub kmeans_rounds: Vec<usize>,
-    block_rng: ChaCha8Rng,
+    /// R Mersenne-Twister shared by k-means++ and block shuffles. Harmony's
+    /// Module methods advance the C-level RNG from `set.seed` without writing
+    /// `.Random.seed` back, so the stream continues across init and every
+    /// `update_R` for the whole `RunHarmony` call.
+    rng: RRng,
 }
 
 /// Run Harmony on a cells × PCs embedding and a single batch vector.
@@ -124,8 +126,8 @@ impl HarmonyState {
         }
 
         let k = config.resolved_nclust(n);
-        // Same integer seed as R `set.seed`, so k-means++ consumes Harmony's
-        // `unif_rand` stream. Embeddings are stored as C++ `float` first.
+        // Same integer seed as R `set.seed`. The C-level stream continues
+        // through k-means++ into every `update_R` shuffle.
         let mut rng = RRng::from_harmony_seed(config.seed);
 
         // Internal layout is PCs × cells, matching the C++ Harmony object.
@@ -164,7 +166,7 @@ impl HarmonyState {
             objective_kmeans: Vec::new(),
             objective_harmony: Vec::new(),
             kmeans_rounds: Vec::new(),
-            block_rng: ChaCha8Rng::seed_from_u64(config.seed.wrapping_add(17)),
+            rng,
         };
         let obj = state.current_objective();
         state.objective_kmeans.push(obj);
@@ -212,11 +214,12 @@ impl HarmonyState {
                 &mut self.o,
                 &mut self.e,
                 self.config.block_size,
-                &mut self.block_rng,
+                &mut self.rng,
             );
             let obj = self.current_objective();
             self.objective_kmeans.push(obj);
-            if iter + 1 > 3 && self.cluster_converged() {
+            // Harmony: `if (iter > window_size)` with window_size = 3.
+            if iter > 3 && self.cluster_converged() {
                 break;
             }
         }

@@ -7,7 +7,9 @@ use ndarray::{Array1, Array2, ArrayView2};
 /// Harmony `kmeans_centers`: their k-means++ (`initialize_centroids`) plus
 /// Euclidean Lloyd steps, then one L2 normalise. Matches `utils.cpp` in
 /// immunogenomics/harmony 2.0.5 — not spherical k-means and not standard
-/// min-distance k-means++.
+/// min-distance k-means++. Arithmetic stays in `float` like Armadillo's
+/// `MATTYPE = float` build. Empty-cluster recovery matches Armadillo's
+/// `km_iterate` (steal last sample from a populous cluster, else `randi`).
 pub fn kmeans_cosine(
     z: ArrayView2<'_, f64>,
     k: usize,
@@ -16,45 +18,49 @@ pub fn kmeans_cosine(
 ) -> Array2<f64> {
     let n = z.ncols();
     let k = k.min(n).max(1);
-    let mut y = initialize_centroids(z, k, rng);
+    let z32 = z.mapv(|v| v as f32);
+    let mut y32 = initialize_centroids(z32.view(), k, rng);
     for _ in 0..iters {
-        y = euclidean_lloyd_step(z, y.view());
+        y32 = euclidean_lloyd_step(z32.view(), y32.view(), rng);
     }
-    l2_normalize_columns(y.view())
+    l2_normalize_columns(y32.mapv(f64::from).view())
 }
 
 /// Harmony `initialize_centroids` (`src/utils.cpp`).
 ///
 /// Distances at step `i` are to `Y.col(i)` only (not the min over chosen
 /// centres). The last cell is excluded from the initial `floor(U*(N-1))` draw.
+/// Draws use `(float) unif_rand()` like `arma::fill::randu` on a float build.
 fn initialize_centroids(
-    z: ArrayView2<'_, f64>,
+    z: ArrayView2<'_, f32>,
     k: usize,
     rng: &mut impl UnitUniform,
-) -> Array2<f64> {
+) -> Array2<f32> {
     let d = z.nrows();
     let n = z.ncols();
-    let mut y = Array2::<f64>::zeros((d, k));
+    let mut y = Array2::<f32>::zeros((d, k));
     let n_init = n.saturating_sub(1).max(1);
+    let n_init_f = n_init as f32;
     for c in 0..k {
-        let idx = ((rng.unit() * n_init as f64).floor() as usize).min(n - 1);
+        let u = rng.unit() as f32;
+        let idx = ((u * n_init_f).floor() as usize).min(n - 1);
         y.column_mut(c).assign(&z.column(idx));
     }
 
     let mut taken = vec![false; n];
     for c in 0..k {
         let mut best_idx = 0usize;
-        let mut best_score = f64::INFINITY;
-        let mut scores = vec![f64::INFINITY; n];
+        let mut best_score = f32::INFINITY;
+        let mut scores = vec![f32::INFINITY; n];
         for j in 0..n {
-            let mut sim = 0.0;
+            let mut sim = 0.0f32;
             for i in 0..d {
                 sim += y[[i, c]] * z[[i, j]];
             }
             let dist = (2.0 * (1.0 - sim)).abs();
-            let u = rng.unit();
+            let u = rng.unit() as f32;
             let score = if dist == 0.0 {
-                f64::INFINITY
+                f32::INFINITY
             } else {
                 -u.ln() / dist
             };
@@ -65,9 +71,9 @@ fn initialize_centroids(
             }
         }
         while taken[best_idx] {
-            scores[best_idx] = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            scores[best_idx] = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             best_idx = 0;
-            best_score = f64::INFINITY;
+            best_score = f32::INFINITY;
             for j in 0..n {
                 if scores[j] < best_score {
                     best_score = scores[j];
@@ -81,48 +87,77 @@ fn initialize_centroids(
     y
 }
 
-/// One `arma::kmeans(..., keep_existing, max_iter=1)` Euclidean Lloyd step.
-/// Centroids are ordinary means (not renormalised) so later steps match
-/// Harmony rather than spherical k-means.
-fn euclidean_lloyd_step(z: ArrayView2<'_, f64>, y: ArrayView2<'_, f64>) -> Array2<f64> {
+/// One `arma::kmeans(..., keep_existing, max_iter=1)` Euclidean Lloyd step in
+/// `float`, including Armadillo's dead-mean recovery from `gmm_diag::km_iterate`.
+fn euclidean_lloyd_step(
+    z: ArrayView2<'_, f32>,
+    y: ArrayView2<'_, f32>,
+    rng: &mut impl UnitUniform,
+) -> Array2<f32> {
     let d = z.nrows();
     let n = z.ncols();
     let k = y.ncols();
-    let mut y_norm2 = vec![0.0f64; k];
+    let mut y_norm2 = vec![0.0f32; k];
     for c in 0..k {
         for i in 0..d {
             y_norm2[c] += y[[i, c]] * y[[i, c]];
         }
     }
-    let mut counts = vec![0.0f64; k];
-    let mut next = Array2::<f64>::zeros((d, k));
+    let mut counts = vec![0usize; k];
+    let mut last_indx = vec![0usize; k];
+    let mut next = Array2::<f32>::zeros((d, k));
     for j in 0..n {
         let mut best = 0usize;
-        let mut best_d = f64::INFINITY;
+        let mut best_d = f32::INFINITY;
         for c in 0..k {
-            let mut dot = 0.0;
+            let mut dot = 0.0f32;
             for i in 0..d {
                 dot += y[[i, c]] * z[[i, j]];
             }
+            // ||z||^2 is constant across centroids for a fixed cell, so it
+            // cancels in the argmin (same as Armadillo's full Euclidean).
             let dval = y_norm2[c] - 2.0 * dot;
             if dval < best_d {
                 best_d = dval;
                 best = c;
             }
         }
-        counts[best] += 1.0;
+        counts[best] += 1;
+        last_indx[best] = j;
         for i in 0..d {
             next[[i, best]] += z[[i, j]];
         }
     }
     for c in 0..k {
-        if counts[c] > 0.0 {
+        if counts[c] >= 1 {
+            let heft = counts[c] as f32;
             for i in 0..d {
-                next[[i, c]] /= counts[c];
+                next[[i, c]] /= heft;
             }
         } else {
-            next.column_mut(c).assign(&y.column(c));
+            // Armadillo zeros dead means before the recovery pass.
+            for i in 0..d {
+                next[[i, c]] = 0.0;
+            }
         }
+    }
+
+    // `live_gs = sort(find(hefts >= 2), "descend")` — sorts cluster *ids*
+    // descending, not hefts.
+    let mut live_gs: Vec<usize> = (0..k).filter(|&c| counts[c] >= 2).collect();
+    live_gs.sort_by(|a, b| b.cmp(a));
+    let dead_gs: Vec<usize> = (0..k).filter(|&c| counts[c] == 0).collect();
+    let mut live_gs_count = 0usize;
+    for &dead_g in &dead_gs {
+        let proposed = if live_gs_count < live_gs.len() {
+            let live_g = live_gs[live_gs_count];
+            live_gs_count += 1;
+            last_indx[live_g]
+        } else {
+            // Last resort: `randi(0, N-1)` via R's `unif_rand` stream.
+            rng.index(n)
+        };
+        next.column_mut(dead_g).assign(&z.column(proposed.min(n - 1)));
     }
     next
 }
@@ -138,26 +173,29 @@ pub fn observed_expected(
     phi: ArrayView2<'_, f64>,
     pr_b: &[f64],
 ) -> (Array2<f64>, Array2<f64>) {
-    let o = r.dot(&phi.t());
-    let k = r.nrows();
-    let b = phi.nrows();
-    let mut e = Array2::<f64>::zeros((k, b));
+    // Harmony: `O = R * Φᵀ`, `E = sum(R,1) * Pr_bᵀ` in float.
+    let r32 = r.mapv(|v| v as f32);
+    let phi32 = phi.mapv(|v| v as f32);
+    let o32 = r32.dot(&phi32.t());
+    let k = r32.nrows();
+    let b = phi32.nrows();
+    let mut e32 = Array2::<f32>::zeros((k, b));
     for i in 0..k {
-        let rk = r.row(i).sum();
+        let rk = r32.row(i).sum();
         for j in 0..b {
-            e[[i, j]] = rk * pr_b[j];
+            e32[[i, j]] = rk * (pr_b[j] as f32);
         }
     }
-    (o, e)
+    (o32.mapv(f64::from), e32.mapv(f64::from))
 }
 
 /// Online block update of soft assignments with the Harmony diversity penalty.
 ///
-/// `r_base` is the distance-only softmax `softmax(-dist / σ)`. Centroids (and
-/// therefore distances) are fixed for a clustering round, so the caller computes
-/// it once and we reuse it for every inner pass and every block. The diversity
-/// term `((2E+1)/(O+E+1))^θ` lives on the cluster × batch table, so `pow` runs
-/// `K · B` times per block instead of once per cell.
+/// Mirrors Harmony `update_R`: Armadillo argsort-shuffle of columns, then online
+/// blocks that drop `R` from `O`/`E`, recompute `R = softmax(-dist/σ) ⊙ diversity`,
+/// and put the cells back — all in `float`. `r_base` is the distance-only softmax
+/// (Harmony re-exps from `dist` each block; with fixed centroids that is the same
+/// table). The diversity term `((2E+1)/(O+E+1))^θ` is a `K × B` table.
 pub fn update_r(
     r: &mut Array2<f64>,
     r_base: ArrayView2<'_, f64>,
@@ -175,11 +213,35 @@ pub fn update_r(
     let mut order: Vec<usize> = (0..n).collect();
     rng.shuffle_cells(&mut order);
 
-    let n_blocks = ((1.0 / block_size).ceil() as usize).max(1);
-    let cells_per_block = ((n as f64 * block_size) as usize).max(1);
-    let mut penalty = Array2::<f64>::zeros((k, b));
-    let mut col = vec![0.0f64; k];
-    let mut cluster_sum = vec![0.0f64; k];
+    // Harmony: `my_ceil(1.0 / block_size)` (float) and `unsigned(N * block_size)`.
+    let block_size_f = block_size as f32;
+    let n_blocks = my_ceil_f32(1.0 / block_size_f).max(1) as usize;
+    let cells_per_block = ((n as f32 * block_size_f) as usize).max(1);
+    let mut penalty = Array2::<f32>::zeros((k, b));
+    let mut col = vec![0.0f32; k];
+    let mut cluster_sum = vec![0.0f32; k];
+    let pr_b32: Vec<f32> = design.pr_b.iter().map(|&p| p as f32).collect();
+    let theta32: Vec<f32> = theta.iter().map(|&t| t as f32).collect();
+
+    // Physical column shuffle like `R = R.cols(update_order)`.
+    let mut r32 = Array2::<f32>::zeros((k, n));
+    let mut base32 = Array2::<f32>::zeros((k, n));
+    let mut batch_of = vec![0usize; n]; // primary covariate level in shuffled order
+    // Multi-covariate: store every covariate's level per shuffled column.
+    let mut levels_shuf = vec![vec![0usize; n]; n_cov];
+    for (t, &j) in order.iter().enumerate() {
+        for i in 0..k {
+            r32[[i, t]] = r[[i, j]] as f32;
+            base32[[i, t]] = r_base[[i, j]] as f32;
+        }
+        for ci in 0..n_cov {
+            levels_shuf[ci][t] = design.global_level(ci, j);
+        }
+        batch_of[t] = design.global_level(0, j);
+    }
+    let mut o32 = o.mapv(|v| v as f32);
+    let mut e32 = e.mapv(|v| v as f32);
+    let _ = batch_of;
 
     for block in 0..n_blocks {
         let start = block * cells_per_block;
@@ -191,40 +253,39 @@ pub fn update_r(
         } else {
             ((block + 1) * cells_per_block).min(n)
         };
-        let cells = &order[start..end];
 
         cluster_sum.fill(0.0);
-        for &j in cells {
+        for t in start..end {
             for i in 0..k {
-                let rij = r[[i, j]];
+                let rij = r32[[i, t]];
                 cluster_sum[i] += rij;
                 for ci in 0..n_cov {
-                    o[[i, design.global_level(ci, j)]] -= rij;
+                    o32[[i, levels_shuf[ci][t]]] -= rij;
                 }
             }
         }
         for i in 0..k {
             let s = cluster_sum[i];
             for bb in 0..b {
-                e[[i, bb]] -= s * design.pr_b[bb];
+                e32[[i, bb]] -= s * pr_b32[bb];
             }
         }
 
         for i in 0..k {
             for bb in 0..b {
-                let num = 2.0 * e[[i, bb]] + 1.0;
-                let den = o[[i, bb]] + e[[i, bb]] + 1.0;
-                penalty[[i, bb]] = (num / den).powf(theta[bb]);
+                let num = 2.0 * e32[[i, bb]] + 1.0;
+                let den = o32[[i, bb]] + e32[[i, bb]] + 1.0;
+                penalty[[i, bb]] = (num / den).powf(theta32[bb]);
             }
         }
 
         cluster_sum.fill(0.0);
-        for &j in cells {
-            let mut sum = 0.0;
+        for t in start..end {
+            let mut sum = 0.0f32;
             for i in 0..k {
-                let mut p = r_base[[i, j]];
+                let mut p = base32[[i, t]];
                 for ci in 0..n_cov {
-                    p *= penalty[[i, design.global_level(ci, j)]];
+                    p *= penalty[[i, levels_shuf[ci][t]]];
                 }
                 col[i] = p;
                 sum += p;
@@ -237,20 +298,38 @@ pub fn update_r(
             }
             for i in 0..k {
                 let rij = col[i];
-                r[[i, j]] = rij;
+                r32[[i, t]] = rij;
                 cluster_sum[i] += rij;
                 for ci in 0..n_cov {
-                    let bb = design.global_level(ci, j);
-                    o[[i, bb]] = (o[[i, bb]] + rij).max(0.0);
+                    o32[[i, levels_shuf[ci][t]]] += rij;
                 }
             }
         }
         for i in 0..k {
             let s = cluster_sum[i];
             for bb in 0..b {
-                e[[i, bb]] = (e[[i, bb]] + s * design.pr_b[bb]).max(0.0);
+                e32[[i, bb]] += s * pr_b32[bb];
             }
         }
+    }
+
+    // Unshuffle: `R = R.cols(reverse_index)`.
+    for (t, &j) in order.iter().enumerate() {
+        for i in 0..k {
+            r[[i, j]] = f64::from(r32[[i, t]]);
+        }
+    }
+    *o = o32.mapv(f64::from);
+    *e = e32.mapv(f64::from);
+}
+
+/// Harmony `my_ceil` on a `float` (`utils.cpp`).
+fn my_ceil_f32(num: f32) -> i32 {
+    let inum = num as i32;
+    if num == inum as f32 {
+        inum
+    } else {
+        inum + 1
     }
 }
 
@@ -498,7 +577,8 @@ mod tests {
             }
             for j in 0..r.ncols() {
                 let col: f64 = (0..r.nrows()).map(|i| r_fast[[i, j]]).sum();
-                assert!((col - 1.0).abs() < 1e-8, "column {j} summed to {col}");
+                // Float L1 renormalise (Harmony) leaves ~1 ulp when widened to f64.
+                assert!((col - 1.0).abs() < 1e-6, "column {j} summed to {col}");
             }
         }
     }
