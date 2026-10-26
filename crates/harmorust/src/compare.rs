@@ -37,6 +37,8 @@ pub struct CompareProtocol {
     pub lambda: f64,
     /// Soft clusters. `None` uses Harmony's default `min(round(N / 30), 100)`.
     pub nclust: Option<usize>,
+    /// Use Harmony2 automatic lambda (`lambda = NULL`) on both kernels.
+    pub auto_lambda: bool,
 }
 
 impl Default for CompareProtocol {
@@ -60,6 +62,7 @@ impl Default for CompareProtocol {
             sigma: 0.1,
             lambda: 1.0,
             nclust: None,
+            auto_lambda: false,
         }
     }
 }
@@ -92,11 +95,29 @@ impl CompareProtocol {
             .collect()
     }
 
+    /// Extended timing matrix from the parity/speed plan: Harmony defaults,
+    /// 32k–250k cells, 30/50 PCs, and `ncores` 1 vs 4. Not run by CI.
+    pub fn extended() -> Self {
+        Self {
+            cell_counts: vec![32_000, 100_000, 250_000],
+            n_pcs: 30,
+            nclust: None,
+            auto_lambda: true,
+            warmup: 1,
+            repeats: 3,
+            ..Self::default()
+        }
+    }
+
     pub fn config(&self, nclust: usize) -> HarmonyConfig {
         HarmonyConfig {
             theta: self.theta,
             sigma: self.sigma,
-            lambda: Some(self.lambda),
+            lambda: if self.auto_lambda {
+                None
+            } else {
+                Some(self.lambda)
+            },
             nclust: Some(nclust),
             max_iter: self.max_iter,
             max_iter_cluster: self.max_iter_cluster,
@@ -108,6 +129,7 @@ impl CompareProtocol {
             batch_prop_cutoff: 1e-5,
             seed: self.seed,
             early_stop: self.early_stop,
+            rng_state: None,
         }
     }
 }
@@ -175,6 +197,7 @@ pub struct ProtocolSummary {
     pub lambda: f64,
     pub seed: u64,
     pub nclust: Option<usize>,
+    pub auto_lambda: bool,
 }
 
 impl From<&CompareProtocol> for ProtocolSummary {
@@ -194,6 +217,7 @@ impl From<&CompareProtocol> for ProtocolSummary {
             lambda: p.lambda,
             seed: p.seed,
             nclust: p.nclust,
+            auto_lambda: p.auto_lambda,
         }
     }
 }
@@ -202,6 +226,8 @@ impl From<&CompareProtocol> for ProtocolSummary {
 pub struct CompareOptions {
     pub rust_only: bool,
     pub rscript: PathBuf,
+    /// Time the harmorust R package (JSON/CLI or run-bin) instead of in-process.
+    pub via_r_package: bool,
 }
 
 impl Default for CompareOptions {
@@ -209,6 +235,7 @@ impl Default for CompareOptions {
         Self {
             rust_only: false,
             rscript: PathBuf::from("Rscript"),
+            via_r_package: false,
         }
     }
 }
@@ -330,6 +357,60 @@ pub fn time_harmorust(
     Ok(stats_from_times(times_ms, n_iter))
 }
 
+/// Time the `harmorust run` CLI (the drop-in R package path, including JSON).
+pub fn time_harmorust_cli(
+    atlas: &SimulatedAtlas,
+    cfg: &HarmonyConfig,
+    warmup: usize,
+    repeats: usize,
+) -> Result<TimingStats> {
+    if repeats == 0 {
+        return Err(HarmonyError::msg("repeats must be >= 1"));
+    }
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("harmorust"));
+    let req = serde_json::json!({
+        "embeddings": atlas.embeddings,
+        "batch": atlas.batch,
+        "config": cfg,
+    });
+    let payload = serde_json::to_vec(&req).map_err(|e| HarmonyError::msg(e.to_string()))?;
+    let run_once = || -> Result<usize> {
+        let mut child = Command::new(&exe)
+            .arg("run")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| HarmonyError::msg(format!("spawn harmorust: {e}")))?;
+        {
+            let mut stdin = child.stdin.take().ok_or_else(|| HarmonyError::msg("no stdin"))?;
+            stdin
+                .write_all(&payload)
+                .map_err(|e| HarmonyError::msg(e.to_string()))?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|e| HarmonyError::msg(e.to_string()))?;
+        if !output.status.success() {
+            return Err(HarmonyError::msg(format!(
+                "harmorust run failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(0)
+    };
+    for _ in 0..warmup {
+        let _ = run_once()?;
+    }
+    let mut times_ms = Vec::with_capacity(repeats);
+    for _ in 0..repeats {
+        let start = Instant::now();
+        let _ = run_once()?;
+        times_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    Ok(stats_from_times(times_ms, 0))
+}
+
 #[derive(Debug, Deserialize)]
 struct OriginalJson {
     version: String,
@@ -376,7 +457,11 @@ pub fn time_original_harmony(
         .arg("--sigma")
         .arg(protocol.sigma.to_string())
         .arg("--lambda")
-        .arg(protocol.lambda.to_string())
+        .arg(if protocol.auto_lambda {
+            "auto".into()
+        } else {
+            protocol.lambda.to_string()
+        })
         .arg("--max-iter-cluster")
         .arg(protocol.max_iter_cluster.to_string())
         .arg("--seed")
@@ -434,7 +519,11 @@ pub fn run_compare(
     for (i, case) in protocol.cases().into_iter().enumerate() {
         let atlas = simulate_atlas(&case.spec);
         let cfg = protocol.config(case.nclust);
-        let rust = time_harmorust(&atlas, &cfg, protocol.warmup, protocol.repeats)?;
+        let rust = if opts.via_r_package {
+            time_harmorust_cli(&atlas, &cfg, protocol.warmup, protocol.repeats)?
+        } else {
+            time_harmorust(&atlas, &cfg, protocol.warmup, protocol.repeats)?
+        };
         let original = if opts.rust_only {
             None
         } else {
@@ -657,6 +746,15 @@ mod tests {
         assert!(cases.windows(2).all(|w| w[0].spec.n_cells < w[1].spec.n_cells));
         assert_eq!(cases[0].nclust, 17); // min(round(500/30), 100)
         assert_eq!(cases.last().unwrap().nclust, 100);
+    }
+
+    #[test]
+    fn extended_matrix_covers_large_n_and_auto_lambda() {
+        let p = CompareProtocol::extended();
+        assert!(p.auto_lambda);
+        assert!(p.cell_counts.contains(&32_000));
+        assert!(p.cell_counts.contains(&250_000));
+        assert_eq!(p.n_pcs, 30);
     }
 
     #[test]

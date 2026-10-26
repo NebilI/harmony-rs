@@ -7,6 +7,40 @@
 //! glibc libmvec was the first landing, but calling it from Rust needs
 //! nightly `simd_ffi`. This module is pure Rust.
 
+/// `dst[i] = expf(src[i])` (Harmony's softmax). AVX2/AVX-512 when available.
+pub fn expf_slice(dst: &mut [f32], src: &[f32]) {
+    assert_eq!(dst.len(), src.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx512f") {
+            unsafe {
+                x86f::expf_avx512(dst, src);
+            }
+            return;
+        }
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            unsafe {
+                x86f::expf_avx2(dst, src);
+            }
+            return;
+        }
+    }
+    for (d, s) in dst.iter_mut().zip(src.iter()) {
+        *d = s.exp();
+    }
+}
+
+/// `dst[i] = ln(src[i])` when `src[i] > 0`, else `0`.
+///
+/// Always `libm` `logf` so Harmony's objective matches bit-for-bit. The
+/// AVX polynomials stay available for non-parity paths.
+pub fn lnf_nonpositive_zero(dst: &mut [f32], src: &[f32]) {
+    assert_eq!(dst.len(), src.len());
+    for (d, s) in dst.iter_mut().zip(src.iter()) {
+        *d = if *s > 0.0 { s.ln() } else { 0.0 };
+    }
+}
+
 /// `dst[i] = exp(src[i])`.
 #[allow(dead_code)]
 pub fn exp_slice(dst: &mut [f64], src: &[f64]) {
@@ -359,6 +393,211 @@ mod x86 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
+mod x86f {
+    use std::arch::x86_64::*;
+
+    const INV_LN2: f32 = std::f32::consts::LOG2_E;
+    const EXP_C1: f32 = 0.693_359_375;
+    const EXP_C2: f32 = -2.121_944_40e-4;
+    const EXP_P0: f32 = 1.987_569_150_0e-4;
+    const EXP_P1: f32 = 1.398_199_950_7e-3;
+    const EXP_P2: f32 = 8.333_451_907_3e-3;
+    const EXP_P3: f32 = 4.166_579_589_4e-2;
+    const EXP_P4: f32 = 1.666_666_545_9e-1;
+    const EXP_P5: f32 = 5.000_000_120_1e-1;
+
+    // Cephes / sse_mathfun `log_ps` — ~1 ulp on (0, ∞) for the Harmony domain.
+    const SQRTHF: f32 = 0.707_106_781_186_547_5;
+    const LOG_P0: f32 = 7.037_683_629_2e-2;
+    const LOG_P1: f32 = -1.151_461_031_0e-1;
+    const LOG_P2: f32 = 1.167_699_874_0e-1;
+    const LOG_P3: f32 = -1.242_014_084_6e-1;
+    const LOG_P4: f32 = 1.424_987_193_6e-1;
+    const LOG_P5: f32 = -1.666_666_727_3e-1;
+    const LOG_Q1: f32 = -2.121_944_40e-4;
+    const LOG_Q2: f32 = 0.693_359_375;
+    const MIN_NORM: f32 = f32::from_bits(0x0080_0000);
+
+    #[target_feature(enable = "avx2", enable = "fma")]
+    pub unsafe fn expf_avx2(dst: &mut [f32], src: &[f32]) {
+        let n = src.len();
+        let mut i = 0;
+        while i + 8 <= n {
+            let x = _mm256_loadu_ps(src.as_ptr().add(i));
+            _mm256_storeu_ps(dst.as_mut_ptr().add(i), exp8(x));
+            i += 8;
+        }
+        while i < n {
+            dst[i] = src[i].exp();
+            i += 1;
+        }
+    }
+
+    #[target_feature(enable = "avx2", enable = "fma")]
+    pub unsafe fn lnf_avx2(dst: &mut [f32], src: &[f32]) {
+        let n = src.len();
+        let mut i = 0;
+        while i + 8 <= n {
+            let x = _mm256_loadu_ps(src.as_ptr().add(i));
+            let pos = _mm256_cmp_ps(x, _mm256_setzero_ps(), _CMP_GT_OQ);
+            let y = _mm256_and_ps(log8(x), pos);
+            _mm256_storeu_ps(dst.as_mut_ptr().add(i), y);
+            i += 8;
+        }
+        while i < n {
+            dst[i] = if src[i] > 0.0 { src[i].ln() } else { 0.0 };
+            i += 1;
+        }
+    }
+
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn expf_avx512(dst: &mut [f32], src: &[f32]) {
+        let n = src.len();
+        let mut i = 0;
+        while i + 16 <= n {
+            let x = _mm512_loadu_ps(src.as_ptr().add(i));
+            _mm512_storeu_ps(dst.as_mut_ptr().add(i), exp16(x));
+            i += 16;
+        }
+        if i < n {
+            expf_avx2(&mut dst[i..], &src[i..]);
+        }
+    }
+
+    #[target_feature(enable = "avx512f")]
+    pub unsafe fn lnf_avx512(dst: &mut [f32], src: &[f32]) {
+        let n = src.len();
+        let mut i = 0;
+        while i + 16 <= n {
+            let x = _mm512_loadu_ps(src.as_ptr().add(i));
+            let pos = _mm512_cmp_ps_mask(x, _mm512_setzero_ps(), _CMP_GT_OQ);
+            let y = _mm512_maskz_mov_ps(pos, log16(x));
+            _mm512_storeu_ps(dst.as_mut_ptr().add(i), y);
+            i += 16;
+        }
+        if i < n {
+            lnf_avx2(&mut dst[i..], &src[i..]);
+        }
+    }
+
+    #[target_feature(enable = "avx2", enable = "fma")]
+    unsafe fn exp8(x: __m256) -> __m256 {
+        let x = _mm256_min_ps(x, _mm256_set1_ps(88.0));
+        let x = _mm256_max_ps(x, _mm256_set1_ps(-88.0));
+        let n = _mm256_round_ps(
+            _mm256_mul_ps(x, _mm256_set1_ps(INV_LN2)),
+            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
+        );
+        let r = _mm256_sub_ps(
+            _mm256_sub_ps(x, _mm256_mul_ps(n, _mm256_set1_ps(EXP_C1))),
+            _mm256_mul_ps(n, _mm256_set1_ps(EXP_C2)),
+        );
+        let mut p = _mm256_fmadd_ps(r, _mm256_set1_ps(EXP_P0), _mm256_set1_ps(EXP_P1));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP_P2));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP_P3));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP_P4));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(EXP_P5));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0));
+        let n_i = _mm256_cvtps_epi32(n);
+        let bits = _mm256_slli_epi32(_mm256_add_epi32(n_i, _mm256_set1_epi32(127)), 23);
+        _mm256_mul_ps(p, _mm256_castsi256_ps(bits))
+    }
+
+    #[target_feature(enable = "avx2", enable = "fma")]
+    unsafe fn log8(x: __m256) -> __m256 {
+        let one = _mm256_set1_ps(1.0);
+        let x = _mm256_max_ps(x, _mm256_set1_ps(MIN_NORM));
+        let bits = _mm256_castps_si256(x);
+        let emm0 = _mm256_sub_epi32(
+            _mm256_srli_epi32(bits, 23),
+            _mm256_set1_epi32(0x7f),
+        );
+        let mut x = _mm256_or_ps(
+            _mm256_and_ps(x, _mm256_castsi256_ps(_mm256_set1_epi32(0x807f_ffff_u32 as i32))),
+            _mm256_set1_ps(0.5),
+        );
+        let mut e = _mm256_cvtepi32_ps(emm0);
+        e = _mm256_add_ps(e, one);
+        let mask = _mm256_cmp_ps(x, _mm256_set1_ps(SQRTHF), _CMP_LT_OQ);
+        let tmp = _mm256_and_ps(x, mask);
+        x = _mm256_sub_ps(x, one);
+        e = _mm256_sub_ps(e, _mm256_and_ps(one, mask));
+        x = _mm256_add_ps(x, tmp);
+        let z = _mm256_mul_ps(x, x);
+        let mut y = _mm256_set1_ps(LOG_P0);
+        y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(LOG_P1));
+        y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(LOG_P2));
+        y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(LOG_P3));
+        y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(LOG_P4));
+        y = _mm256_fmadd_ps(y, x, _mm256_set1_ps(LOG_P5));
+        y = _mm256_mul_ps(y, x);
+        y = _mm256_mul_ps(y, z);
+        y = _mm256_add_ps(y, _mm256_mul_ps(e, _mm256_set1_ps(LOG_Q1)));
+        y = _mm256_sub_ps(y, _mm256_mul_ps(z, _mm256_set1_ps(0.5)));
+        x = _mm256_add_ps(x, y);
+        _mm256_add_ps(x, _mm256_mul_ps(e, _mm256_set1_ps(LOG_Q2)))
+    }
+
+    #[target_feature(enable = "avx512f")]
+    unsafe fn exp16(x: __m512) -> __m512 {
+        let x = _mm512_min_ps(x, _mm512_set1_ps(88.0));
+        let x = _mm512_max_ps(x, _mm512_set1_ps(-88.0));
+        let n = _mm512_roundscale_ps(_mm512_mul_ps(x, _mm512_set1_ps(INV_LN2)), 0);
+        let r = _mm512_sub_ps(
+            _mm512_sub_ps(x, _mm512_mul_ps(n, _mm512_set1_ps(EXP_C1))),
+            _mm512_mul_ps(n, _mm512_set1_ps(EXP_C2)),
+        );
+        let mut p = _mm512_fmadd_ps(r, _mm512_set1_ps(EXP_P0), _mm512_set1_ps(EXP_P1));
+        p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(EXP_P2));
+        p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(EXP_P3));
+        p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(EXP_P4));
+        p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(EXP_P5));
+        p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(1.0));
+        p = _mm512_fmadd_ps(p, r, _mm512_set1_ps(1.0));
+        let n_i = _mm512_cvtps_epi32(n);
+        let bits = _mm512_slli_epi32(_mm512_add_epi32(n_i, _mm512_set1_epi32(127)), 23);
+        _mm512_mul_ps(p, _mm512_castsi512_ps(bits))
+    }
+
+    #[target_feature(enable = "avx512f")]
+    unsafe fn log16(x: __m512) -> __m512 {
+        let one = _mm512_set1_ps(1.0);
+        let x = _mm512_max_ps(x, _mm512_set1_ps(MIN_NORM));
+        let bits = _mm512_castps_si512(x);
+        let emm0 = _mm512_sub_epi32(
+            _mm512_srli_epi32(bits, 23),
+            _mm512_set1_epi32(0x7f),
+        );
+        let mut x = _mm512_or_ps(
+            _mm512_and_ps(x, _mm512_castsi512_ps(_mm512_set1_epi32(0x807f_ffff_u32 as i32))),
+            _mm512_set1_ps(0.5),
+        );
+        let mut e = _mm512_cvtepi32_ps(emm0);
+        e = _mm512_add_ps(e, one);
+        let mask = _mm512_cmp_ps_mask(x, _mm512_set1_ps(SQRTHF), _CMP_LT_OQ);
+        let tmp = _mm512_maskz_mov_ps(mask, x);
+        x = _mm512_sub_ps(x, one);
+        e = _mm512_mask_sub_ps(e, mask, e, one);
+        x = _mm512_add_ps(x, tmp);
+        let z = _mm512_mul_ps(x, x);
+        let mut y = _mm512_set1_ps(LOG_P0);
+        y = _mm512_fmadd_ps(y, x, _mm512_set1_ps(LOG_P1));
+        y = _mm512_fmadd_ps(y, x, _mm512_set1_ps(LOG_P2));
+        y = _mm512_fmadd_ps(y, x, _mm512_set1_ps(LOG_P3));
+        y = _mm512_fmadd_ps(y, x, _mm512_set1_ps(LOG_P4));
+        y = _mm512_fmadd_ps(y, x, _mm512_set1_ps(LOG_P5));
+        y = _mm512_mul_ps(y, x);
+        y = _mm512_mul_ps(y, z);
+        y = _mm512_add_ps(y, _mm512_mul_ps(e, _mm512_set1_ps(LOG_Q1)));
+        y = _mm512_sub_ps(y, _mm512_mul_ps(z, _mm512_set1_ps(0.5)));
+        x = _mm512_add_ps(x, y);
+        _mm512_add_ps(x, _mm512_mul_ps(e, _mm512_set1_ps(LOG_Q2)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +631,57 @@ mod tests {
         ln_nonpositive_zero(&mut got, &src);
         let err = max_abs_err(&got, &want);
         assert!(err < 1e-12, "max |Δln| = {err}");
+    }
+
+    #[test]
+    fn expf_matches_libm_on_softmax_range() {
+        let src: Vec<f32> = (0..257)
+            .map(|i| -20.0 + i as f32 * 20.0 / 256.0)
+            .collect();
+        let mut got = vec![0.0f32; src.len()];
+        let want: Vec<f32> = src.iter().map(|x| x.exp()).collect();
+        expf_slice(&mut got, &src);
+        let err = got
+            .iter()
+            .zip(&want)
+            .map(|(g, w)| (g - w).abs())
+            .fold(0.0f32, f32::max);
+        assert!(err < 2e-6, "max |Δexpf| = {err}");
+    }
+
+    #[test]
+    fn lnf_matches_libm_on_assignment_range() {
+        let src: Vec<f32> = (1..200).map(|i| i as f32 / 200.0).collect();
+        let mut got = vec![0.0f32; src.len()];
+        let want: Vec<f32> = src.iter().map(|x| x.ln()).collect();
+        lnf_nonpositive_zero(&mut got, &src);
+        for (g, w) in got.iter().zip(&want) {
+            assert_eq!(g.to_bits(), w.to_bits(), "lnf {g} vs {w}");
+        }
+    }
+
+    #[test]
+    fn simd_lnf_is_close_on_assignment_range() {
+        let src: Vec<f32> = (1..200).map(|i| i as f32 / 200.0).collect();
+        let mut got = vec![0.0f32; src.len()];
+        let want: Vec<f32> = src.iter().map(|x| x.ln()).collect();
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                unsafe {
+                    x86f::lnf_avx2(&mut got, &src);
+                }
+                let err = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(g, w)| (g - w).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(err < 0.05, "max |Δ simd lnf| = {err}");
+                return;
+            }
+        }
+        lnf_nonpositive_zero(&mut got, &src);
+        assert_eq!(got, want);
     }
 
     #[test]

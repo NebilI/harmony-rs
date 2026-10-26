@@ -29,7 +29,7 @@ harmorust reimplements the published Harmony2 loop, not a copy of the GPL-3 C++ 
 
 Harmony 2.0.5 only **exports** `RunHarmony`, `harmony_options`, and `%>%`. harmorust matches those entry points (minus the dplyr pipe re-export) and also exports `HarmonyConvergencePlot` so `plot_convergence=TRUE` / `return_object=TRUE` workflows work without reaching into internals.
 
-The R package calls the `harmorust` CLI over JSON (`HARMORUST_BIN` or `PATH`). That is the current bind path; an extendr staticlib like seurust is still a possible later swap.
+The R package calls the `harmorust` CLI over the binary `HRu1` protocol (`run-bin`), falling back to JSON. An extendr staticlib like seurust is still a possible later swap.
 
 seurust is **not** a Harmony implementation. It supplies the Seurat kernels that produce the PCA embedding Harmony consumes (`NormalizeData`, `ScaleData`, SNN). Compose them:
 
@@ -45,11 +45,11 @@ obj <- harmorust::RunHarmony(obj, group.by.vars = "donor")
 
 ## Not bit-identical (yet)
 
-- Harmony C++ defaults to `float`. We now run k-means++, Lloyd (including Armadillo dead-mean recovery), softmax, online `update_R`, and the ridge invert/apply in `float`. Residual `|Δ|` on ridge-only cases is ~`1e-5`–`3e-5` from OpenBLAS float GEMM vs our index-walk accumulation.
-- k-means++ matches Harmony's `initialize_centroids` and R's `runif` stream. Init centroids agree to ~`1e-7`.
-- Block shuffles use Armadillo's argsort-of-`randi` (`Rf_runif(0, RAND_MAX)`), continuing the same C-level stream after k-means++. Online multi-block `update_R` still drifts on tiny atlases (`N=200`, `nclust=5` → max `|Δ|` ~`1e-2`); larger cases stay near the float floor.
-- `ncores` maps to Rayon, not OpenMP / OpenBLAS (`RhpcBLASctl`). Parity runs with `ncores=1` so Armadillo Lloyd is serial.
-- `return_object` is a harmorust list with Harmony field names, not the Rcpp C++ module (no live `cluster_cpp` / `moe_correct_ridge_cpp` methods).
+- Harmony C++ defaults to `float` when BLAS provides `sdot_`/`sgetrf_`. harmorust's kernel is float and fails the live gate if Harmony was compiled as `double` (`HARMORUST_ALLOW_DOUBLE=1` to override). Residual `|Δ|` on ridge-only cases is a few ulp on reference BLAS and ~`1e-5` on OpenBLAS GEMM.
+- k-means++ and Lloyd match Harmony's `initialize_centroids` / Armadillo `km_iterate` (float two-accumulator distance, dead-mean resurrection, shared R stream).
+- Block shuffles use Armadillo's argsort-of-`randi` on that same stream. The R package forwards and restores `.Random.seed`.
+- `ncores` maps to Rayon, not OpenMP / OpenBLAS (`RhpcBLASctl`). Parity runs with `ncores=1`.
+- `return_object` is a harmorust list with Harmony field names (`R`/`Y`/`O`/`E`/`objective_*`), not the live Rcpp module.
 - No `%>%` re-export from dplyr.
 
 A future `tests/testthat/test_rust_harmony.R` should compare `harmony::RunHarmony(...)` to `harmorust::RunHarmony` the way seurust compares `LogNorm`.
@@ -68,15 +68,20 @@ cargo run -p harmorust --release -- parity --check
 
 ## Pull-request gate
 
-Every pull request must keep gated `|harmorust − Harmony|` at or below `PARITY_MAX_ABS` (`1e-4`). That is four orders below a divergent k-means++ (`0.1`–`2`) and still above the C++ `float` type gap (`~3e-5`). `1e-6` is the long-term target after the ridge matches OpenBLAS float GEMM.
+Every pull request must keep gated `|harmorust − Harmony|` at or below `PARITY_MAX_ABS` (`1e-4`, override with `HARMORUST_PARITY_MAX`). Discrete fields (`n_iter`, `kmeans_rounds`) are zero-tolerance. The previous `nclust > 1 && N < 400` skip is gone: small multi-cluster cases, `E`, and the objective trace are gated.
 
-CI installs CRAN harmony and runs `cargo test --workspace` with `HARMORUST_REQUIRE_PARITY=1` plus `harmorust parity --check --cells 200,500 --nclust 1,5`. Local `cargo test` still skips the live Harmony cases when the R package is missing; the gate unit tests (a fake `1.8` fails, a `3e-5` type gap passes) always run.
+CI has two jobs:
 
-Gated fields: `embeddings`, `R`, `Y`, `O`, `moe_correct_ridge`. Skipped: `objective` (it accumulates inner rounds) and end-to-end `embeddings` / `R` / `Y` / `O` when `nclust > 1` and `N < 400` until Armadillo Lloyd matches. Ridge on Harmony’s final `R` stays gated on those small multi-cluster cases.
+- **reference-blas** — apt reference BLAS/LAPACK, Harmony built from source, `ncores=1`. `meta.json` records Harmony's scalar type, BLAS, LAPACK, and RcppArmadillo; the harness fails if Harmony is a `double` build.
+- **openblas** — binary Harmony, `HARMORUST_PARITY_MAX=1e-5` (kernel GEMM order is not reproducible).
+
+`cargo test --workspace` with `HARMORUST_REQUIRE_PARITY=1` plus `harmorust parity --check --cells 200,500 --nclust 1,5 --ncores 1`. Local `cargo test` skips the live Harmony cases when the R package is missing. Golden fixtures under `crates/harmorust/tests/fixtures/` (`scripts/regen-fixtures.sh`) check the kernel without R.
+
+Gated fields: `embeddings`, `R`, `Y`, `O`, `E`, `moe_correct_ridge`, `objective`, `n_iter`, `kmeans_rounds`. Stage dumps (setup / init / each cluster+correct round) and teacher-forced per-stage diffs are reported as `first_divergence` / `stage_*` / `teacher_*`.
 
 Both sides see the same embeddings and hyperparameters (`max_iter = 8`, early stopping off, `lambda = 1`, 20 PCs, 4 batches). Harmony 2.0.5 stores the C++ loop in `float`. harmorust matches that path for k-means++ / Lloyd / softmax / ridge, uses Armadillo's argsort shuffle on the shared R stream, and compares soft-assignment matrices after aligning clusters on `Y`. `moe_correct_ridge` is harmorust's ridge applied to Harmony's final `R`, compared to Harmony's `Z_corr`.
 
-`nclust = 1` is ordinary ridge (no clustering ambiguity). Some embedding entries match exactly (`min |Δ| = 0`). Max stays around `3e-05` from float GEMM vs our index-walk ridge. `nclust = 5` on 200 cells is still gated off for end-to-end `R`/`Y`/`O`/embeddings (`N < 400`); the leftover ~`1e-2` is online multi-block `update_R` float drift, not the ridge (`moe_correct_ridge` max is `~1.6e-05`).
+`nclust = 1` is ordinary ridge (no clustering ambiguity). Some embedding entries match exactly (`min |Δ| = 0`). Max stays around the float / GEMM floor. `nclust = 5` is now gated end-to-end, including `N = 200`.
 
 Measured on this machine against Harmony 2.0.5 / harmorust 0.1.0 (`ncores=1` for parity), after the float Lloyd / Armadillo shuffle / float ridge landing.
 

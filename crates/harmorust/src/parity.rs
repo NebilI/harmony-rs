@@ -20,7 +20,7 @@ use crate::compare::{
 use crate::correct::{default_lambda, moe_correct_ridge};
 use crate::design::encode_labels;
 use crate::error::{HarmonyError, Result};
-use crate::harmony::{embeddings_from_rows, run_harmony, HarmonyResult};
+use crate::harmony::{embeddings_from_rows, run_harmony, HarmonyResult, HarmonyState};
 use crate::simulate::{simulate_atlas, SimulatedAtlas};
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
@@ -33,11 +33,30 @@ const ORIGINAL_PARITY_R: &str = include_str!("../scripts/original_harmony_parity
 /// Pull-request ceiling for `|harmorust − Harmony|` on gated matrices.
 ///
 /// Harmony's loop is C++ `float`, so a few 1e-5 residuals are expected.
-/// `1e-6` is the long-term target once the ridge matches OpenBLAS float GEMM;
-/// `1e-4` is still two to four orders below a divergent k-means++ (`0.1`–`2`).
+/// Override with `HARMORUST_PARITY_MAX` (OpenBLAS jobs may keep `1e-4`;
+/// reference-BLAS source builds aim at a few ulp).
 pub const PARITY_MAX_ABS: f64 = 1e-4;
 
-const GATED_FIELDS: &[&str] = &["embeddings", "R", "Y", "O", "moe_correct_ridge"];
+pub fn parity_max_abs() -> f64 {
+    match std::env::var("HARMORUST_PARITY_MAX") {
+        Ok(raw) => raw.parse().unwrap_or(PARITY_MAX_ABS),
+        Err(_) => PARITY_MAX_ABS,
+    }
+}
+
+const GATED_FIELDS: &[&str] = &[
+    "embeddings",
+    "R",
+    "Y",
+    "O",
+    "E",
+    "moe_correct_ridge",
+    "objective",
+    "n_iter",
+    "kmeans_rounds",
+];
+
+const DISCRETE_FIELDS: &[&str] = &["n_iter", "kmeans_rounds"];
 
 /// Fields whose max `|Δ|` is enforced on a pull request.
 pub fn field_is_gated(name: &str) -> bool {
@@ -46,18 +65,17 @@ pub fn field_is_gated(name: &str) -> bool {
 
 /// Limit for one compared field, or `None` to skip it.
 ///
-/// `objective` traces are skipped (they accumulate inner rounds). End-to-end
-/// `R` / `Y` / `O` / embeddings on `nclust > 1` with fewer than 400 cells are
-/// skipped until online multi-block `update_R` matches Harmony's float path
-/// more tightly; `moe_correct_ridge` stays gated.
-pub fn field_limit(n_clusters: usize, n_cells: usize, field: &str) -> Option<f64> {
+/// `objective` traces are reported but not gated (they accumulate inner
+/// rounds). End-to-end matrices, including small multi-cluster cases and `E`,
+/// are gated at [`parity_max_abs`].
+pub fn field_limit(_n_clusters: usize, _n_cells: usize, field: &str) -> Option<f64> {
     if !field_is_gated(field) {
         return None;
     }
-    if n_clusters > 1 && n_cells < 400 && field != "moe_correct_ridge" {
-        return None;
+    if DISCRETE_FIELDS.contains(&field) {
+        return Some(0.0);
     }
-    Some(PARITY_MAX_ABS)
+    Some(parity_max_abs())
 }
 
 /// One gated field that exceeded [`PARITY_MAX_ABS`].
@@ -108,7 +126,7 @@ pub fn assert_parity_within(report: &ParityReport) -> Result<()> {
     }
     let mut msg = format!(
         "parity gate failed (max |Δ| must be ≤ {}):",
-        fmt_sci(PARITY_MAX_ABS)
+        fmt_sci(parity_max_abs())
     );
     for v in &violations {
         msg.push_str(&format!(
@@ -206,12 +224,26 @@ pub struct ParityRow {
     pub n_clusters: usize,
     pub rust_n_iter: usize,
     pub original_n_iter: usize,
+    #[serde(default)]
+    pub rust_kmeans_rounds: Vec<usize>,
+    #[serde(default)]
+    pub original_kmeans_rounds: Vec<usize>,
+    #[serde(default)]
+    pub first_divergence: Option<String>,
     pub fields: Vec<FieldDiff>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParityReport {
     pub original_version: Option<String>,
+    #[serde(default)]
+    pub scalar_type: Option<String>,
+    #[serde(default)]
+    pub blas: Option<String>,
+    #[serde(default)]
+    pub lapack: Option<String>,
+    #[serde(default)]
+    pub rcpparmadillo: Option<String>,
     pub n_pcs: usize,
     pub n_batches: usize,
     pub max_iter: usize,
@@ -505,6 +537,20 @@ struct OriginalMeta {
     has_y: bool,
     has_o: bool,
     has_e: bool,
+    #[serde(default)]
+    scalar_type: Option<String>,
+    #[serde(default)]
+    blas: Option<String>,
+    #[serde(default)]
+    lapack: Option<String>,
+    #[serde(default)]
+    rcpparmadillo: Option<String>,
+    #[serde(default)]
+    ncores: Option<usize>,
+    #[serde(default)]
+    n_stages: Option<usize>,
+    #[serde(default)]
+    kmeans_rounds: Vec<usize>,
     objective: Vec<f64>,
 }
 
@@ -519,6 +565,12 @@ struct OriginalDump {
     o: Option<Vec<Vec<f64>>>,
     e: Option<Vec<Vec<f64>>>,
     objective: Vec<f64>,
+    kmeans_rounds: Vec<usize>,
+    scalar_type: Option<String>,
+    blas: Option<String>,
+    lapack: Option<String>,
+    rcpparmadillo: Option<String>,
+    stages: Vec<(String, Vec<Vec<f64>>)>,
 }
 
 fn read_csv_matrix(path: &Path) -> Result<Vec<Vec<f64>>> {
@@ -641,7 +693,36 @@ fn run_original_harmony(
         o: load(meta.has_o, "O.csv")?,
         e: load(meta.has_e, "E.csv")?,
         objective: meta.objective,
+        kmeans_rounds: meta.kmeans_rounds,
+        scalar_type: meta.scalar_type,
+        blas: meta.blas,
+        lapack: meta.lapack,
+        rcpparmadillo: meta.rcpparmadillo,
+        stages: load_stages(&out_dir.join("stages")),
     })
+}
+
+fn load_stages(dir: &Path) -> Vec<(String, Vec<Vec<f64>>)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("csv"))
+        .collect();
+    names.sort();
+    let mut out = Vec::new();
+    for path in names {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("stage")
+            .to_string();
+        if let Ok(m) = read_csv_matrix(&path) {
+            out.push((name, m));
+        }
+    }
+    out
 }
 
 fn rust_ridge_from_original(
@@ -731,14 +812,7 @@ fn compare_case(
         fields.push(field_diff("Y", &rust.y, &orig_y, aligned));
         fields.push(field_diff("O", &rust.o, &orig_o, aligned));
         if let Some(orig_e) = orig_e {
-            // harmorust does not currently export E on HarmonyResult; rebuild
-            // it from rust O's row sums × batch proportions via a fresh run
-            // is unnecessary — compare original E against rust-derived E from O.
-            // We only have rust O. Skip a rust-vs-original E unless we add E
-            // to HarmonyResult. Compare original E against itself? No.
-            // Just skip rust E; the field is still useful if we dump rust E
-            // from observed_expected. Leave E as original-only ridge input.
-            let _ = orig_e;
+            fields.push(field_diff("E", &rust.e, &orig_e, aligned));
         }
     } else {
         if let Some(orig_r) = &orig.r {
@@ -757,6 +831,54 @@ fn compare_case(
         &rust.objective,
         &orig.objective,
     ));
+
+    let n_iter_delta = if rust.n_iter == orig.n_iter { 0.0 } else { 1.0 };
+    fields.push(FieldDiff {
+        name: "n_iter".into(),
+        rust_shape: (1, 1),
+        original_shape: (1, 1),
+        aligned: false,
+        stats: Some(AbsDiffStats {
+            n: 1,
+            min: n_iter_delta,
+            max: n_iter_delta,
+            mean: n_iter_delta,
+            median: n_iter_delta,
+        }),
+        note: if n_iter_delta == 0.0 {
+            None
+        } else {
+            Some(format!("rust {} vs original {}", rust.n_iter, orig.n_iter))
+        },
+    });
+    if !orig.kmeans_rounds.is_empty() {
+        let kr_delta = if rust.kmeans_rounds == orig.kmeans_rounds {
+            0.0
+        } else {
+            1.0
+        };
+        fields.push(FieldDiff {
+            name: "kmeans_rounds".into(),
+            rust_shape: (1, rust.kmeans_rounds.len()),
+            original_shape: (1, orig.kmeans_rounds.len()),
+            aligned: false,
+            stats: Some(AbsDiffStats {
+                n: 1,
+                min: kr_delta,
+                max: kr_delta,
+                mean: kr_delta,
+                median: kr_delta,
+            }),
+            note: if kr_delta == 0.0 {
+                None
+            } else {
+                Some(format!(
+                    "rust {:?} vs original {:?}",
+                    rust.kmeans_rounds, orig.kmeans_rounds
+                ))
+            },
+        });
+    }
 
     match rust_ridge_from_original(atlas, orig, protocol) {
         Ok(ridge) => {
@@ -777,6 +899,39 @@ fn compare_case(
         }),
     }
 
+    if let Ok(extra) = rust_stage_diffs(atlas, orig, protocol, rust.n_clusters) {
+        fields.extend(extra);
+    }
+
+    let first_divergence = ["n_iter", "kmeans_rounds", "Y", "R", "O", "E", "embeddings"]
+        .into_iter()
+        .find_map(|name| {
+            fields.iter().find_map(|f| {
+                if f.name == name {
+                    f.stats.as_ref().and_then(|s| {
+                        if s.max > 0.0 {
+                            Some(f.name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+        })
+        .or_else(|| {
+            fields.iter().find_map(|f| {
+                f.stats.as_ref().and_then(|s| {
+                    if s.max > 0.0 {
+                        Some(f.name.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+        });
+
     ParityRow {
         name: name.into(),
         n_cells: atlas.n_cells,
@@ -784,8 +939,73 @@ fn compare_case(
         n_clusters: rust.n_clusters,
         rust_n_iter: rust.n_iter,
         original_n_iter: orig.n_iter,
+        rust_kmeans_rounds: rust.kmeans_rounds.clone(),
+        original_kmeans_rounds: orig.kmeans_rounds.clone(),
+        first_divergence,
         fields,
     }
+}
+
+fn stage_named<'a>(
+    stages: &'a [(String, Vec<Vec<f64>>)],
+    suffix: &str,
+) -> Option<&'a [Vec<f64>]> {
+    stages
+        .iter()
+        .find(|(n, _)| n.ends_with(suffix) || n == suffix)
+        .map(|(_, m)| m.as_slice())
+}
+
+fn rust_stage_diffs(
+    atlas: &SimulatedAtlas,
+    orig: &OriginalDump,
+    protocol: &CompareProtocol,
+    nclust: usize,
+) -> Result<Vec<FieldDiff>> {
+    if orig.stages.is_empty() {
+        return Ok(Vec::new());
+    }
+    let design = encode_labels(&atlas.batch)?;
+    let z = embeddings_from_rows(&atlas.embeddings)?;
+    let cfg = protocol.config(nclust);
+    let state = HarmonyState::setup(z.view(), design, &cfg)?;
+    let mut fields = Vec::new();
+    if let Some(y) = stage_named(&orig.stages, "init_Y") {
+        let orig_y = orient(y, atlas.n_pcs, state.y.ncols()).unwrap_or_else(|| y.to_vec());
+        fields.push(field_diff("stage_init_Y", &array_to_rows(&state.y), &orig_y, false));
+    }
+    if let Some(r) = stage_named(&orig.stages, "init_R") {
+        let orig_r = orient(r, state.r.nrows(), atlas.n_cells).unwrap_or_else(|| r.to_vec());
+        fields.push(field_diff("stage_init_R", &array_to_rows(&state.r), &orig_r, false));
+    }
+    if let Some(y) = stage_named(&orig.stages, "init_Y") {
+        let orig_y = orient(y, atlas.n_pcs, state.y.ncols()).unwrap_or_else(|| y.to_vec());
+        if let Ok(y_arr) = rows_to_array(&orig_y) {
+            let mut forced = HarmonyState::setup(
+                embeddings_from_rows(&atlas.embeddings)?.view(),
+                encode_labels(&atlas.batch)?,
+                &cfg,
+            )?;
+            forced.teacher_force_y(y_arr);
+            forced.cluster_round();
+            if let Some(r) = stage_named(&orig.stages, "cluster_R") {
+                let orig_r = orient(r, forced.r.nrows(), atlas.n_cells).unwrap_or_else(|| r.to_vec());
+                fields.push(field_diff(
+                    "teacher_cluster_R",
+                    &array_to_rows(&forced.r),
+                    &orig_r,
+                    false,
+                ));
+            }
+        }
+    }
+    Ok(fields)
+}
+
+fn array_to_rows(z: &Array2<f64>) -> Vec<Vec<f64>> {
+    (0..z.nrows())
+        .map(|i| (0..z.ncols()).map(|j| z[[i, j]]).collect())
+        .collect()
 }
 
 pub fn run_parity(protocol: &ParityProtocol, opts: &ParityOptions) -> Result<ParityReport> {
@@ -799,6 +1019,10 @@ pub fn run_parity(protocol: &ParityProtocol, opts: &ParityOptions) -> Result<Par
     let pid = std::process::id();
     let mut rows = Vec::new();
     let mut original_version = None;
+    let mut scalar_type = None;
+    let mut blas = None;
+    let mut lapack = None;
+    let mut rcpparmadillo = None;
     let mut case_i = 0usize;
     for nclust_opt in &protocol.nclusts {
         let cmp = protocol.with_nclust(*nclust_opt);
@@ -820,6 +1044,22 @@ pub fn run_parity(protocol: &ParityProtocol, opts: &ParityOptions) -> Result<Par
                 std::env::temp_dir().join(format!("harmorust-parity-{pid}-{case_i}"));
             let orig = run_original_harmony(&atlas, &cmp, nclust, &opts.rscript, &workdir)?;
             original_version = Some(orig.version.clone());
+            scalar_type = orig.scalar_type.clone();
+            blas = orig.blas.clone();
+            lapack = orig.lapack.clone();
+            rcpparmadillo = orig.rcpparmadillo.clone();
+            if let Some(st) = &orig.scalar_type {
+                if st != "float"
+                    && std::env::var("HARMORUST_ALLOW_DOUBLE").is_err()
+                {
+                    return Err(HarmonyError::msg(format!(
+                        "Harmony compiled with SCALAR={st}, but harmorust's \
+                         default kernel is float. Rebuild harmony against a \
+                         BLAS that provides sdot_/sgetrf_, or set \
+                         HARMORUST_ALLOW_DOUBLE=1."
+                    )));
+                }
+            }
             let label = format!(
                 "atlas-{} nclust={}",
                 atlas.n_cells,
@@ -835,6 +1075,10 @@ pub fn run_parity(protocol: &ParityProtocol, opts: &ParityOptions) -> Result<Par
 
     Ok(ParityReport {
         original_version,
+        scalar_type,
+        blas,
+        lapack,
+        rcpparmadillo,
         n_pcs: protocol.compare.n_pcs,
         n_batches: protocol.compare.n_batches,
         max_iter: protocol.compare.max_iter,
@@ -891,7 +1135,16 @@ pub fn print_report(report: &ParityReport, json: bool) {
         "moe_correct_ridge is harmorust's ridge applied to Harmony's final R, vs Harmony Z_corr."
     );
     if let Some(v) = &report.original_version {
-        println!("original: immunogenomics/harmony {v} (C++ float via R)");
+        println!("original: immunogenomics/harmony {v} (C++ via R)");
+    }
+    if let Some(st) = &report.scalar_type {
+        println!(
+            "Harmony SCALAR={}  BLAS={}  LAPACK={}  RcppArmadillo={}",
+            st,
+            report.blas.as_deref().unwrap_or("?"),
+            report.lapack.as_deref().unwrap_or("?"),
+            report.rcpparmadillo.as_deref().unwrap_or("?")
+        );
     }
     println!("new: harmorust {}", env!("CARGO_PKG_VERSION"));
     println!();
@@ -899,9 +1152,18 @@ pub fn print_report(report: &ParityReport, json: bool) {
     println!();
     for row in &report.rows {
         println!(
-            "{}: rust n_iter={} original n_iter={}",
-            row.name, row.rust_n_iter, row.original_n_iter
+            "{}: rust n_iter={} original n_iter={} first_divergence={}",
+            row.name,
+            row.rust_n_iter,
+            row.original_n_iter,
+            row.first_divergence.as_deref().unwrap_or("none")
         );
+        if !row.rust_kmeans_rounds.is_empty() || !row.original_kmeans_rounds.is_empty() {
+            println!(
+                "  kmeans_rounds rust={:?} original={:?}",
+                row.rust_kmeans_rounds, row.original_kmeans_rounds
+            );
+        }
         for field in &row.fields {
             match (&field.stats, &field.note) {
                 (Some(s), note) => {
@@ -978,6 +1240,9 @@ mod tests {
             n_clusters: 1,
             rust_n_iter: 8,
             original_n_iter: 8,
+            rust_kmeans_rounds: vec![],
+            original_kmeans_rounds: vec![],
+            first_divergence: None,
             fields: vec![FieldDiff {
                 name: "embeddings".into(),
                 rust_shape: (200, 4),
@@ -1075,6 +1340,9 @@ mod tests {
             n_clusters,
             rust_n_iter: 8,
             original_n_iter: 8,
+            rust_kmeans_rounds: vec![],
+            original_kmeans_rounds: vec![],
+            first_divergence: None,
             fields,
         }
     }
@@ -1082,6 +1350,10 @@ mod tests {
     fn fake_report(rows: Vec<ParityRow>) -> ParityReport {
         ParityReport {
             original_version: Some("2.0.5".into()),
+            scalar_type: Some("float".into()),
+            blas: None,
+            lapack: None,
+            rcpparmadillo: None,
             n_pcs: 20,
             n_batches: 4,
             max_iter: 8,
@@ -1101,17 +1373,20 @@ mod tests {
     }
 
     #[test]
-    fn field_limit_skips_objective_and_small_multicluster_loop() {
-        assert_eq!(field_limit(1, 200, "objective"), None);
-        assert_eq!(field_limit(5, 200, "embeddings"), None);
-        assert_eq!(field_limit(5, 200, "R"), None);
-        assert_eq!(field_limit(5, 200, "Y"), None);
-        assert_eq!(field_limit(5, 200, "O"), None);
-        assert_eq!(field_limit(5, 200, "moe_correct_ridge"), Some(PARITY_MAX_ABS));
-        assert_eq!(field_limit(1, 200, "embeddings"), Some(PARITY_MAX_ABS));
-        assert_eq!(field_limit(5, 500, "embeddings"), Some(PARITY_MAX_ABS));
-        assert!(!field_is_gated("objective"));
+    fn field_limit_gates_end_to_end_including_small_multicluster() {
+        assert_eq!(field_limit(1, 200, "objective"), Some(parity_max_abs()));
+        assert_eq!(field_limit(5, 200, "embeddings"), Some(parity_max_abs()));
+        assert_eq!(field_limit(5, 200, "R"), Some(parity_max_abs()));
+        assert_eq!(field_limit(5, 200, "Y"), Some(parity_max_abs()));
+        assert_eq!(field_limit(5, 200, "O"), Some(parity_max_abs()));
+        assert_eq!(field_limit(5, 200, "E"), Some(parity_max_abs()));
+        assert_eq!(field_limit(5, 200, "moe_correct_ridge"), Some(parity_max_abs()));
+        assert_eq!(field_limit(1, 200, "embeddings"), Some(parity_max_abs()));
+        assert_eq!(field_limit(5, 200, "n_iter"), Some(0.0));
+        assert_eq!(field_limit(5, 200, "kmeans_rounds"), Some(0.0));
+        assert!(field_is_gated("objective"));
         assert!(field_is_gated("moe_correct_ridge"));
+        assert!(field_is_gated("E"));
     }
 
     #[test]
@@ -1141,8 +1416,10 @@ mod tests {
                     fake_field("R", Some(1e-16)),
                     fake_field("Y", Some(5e-6)),
                     fake_field("O", Some(0.0)),
-                    fake_field("objective", Some(10.0)),
+                    fake_field("objective", Some(3e-5)),
                     fake_field("moe_correct_ridge", Some(3e-5)),
+                    fake_field("n_iter", Some(0.0)),
+                    fake_field("kmeans_rounds", Some(0.0)),
                 ],
             ),
             fake_row(
@@ -1150,8 +1427,8 @@ mod tests {
                 200,
                 5,
                 vec![
-                    fake_field("embeddings", Some(1.8)),
-                    fake_field("R", Some(0.04)),
+                    fake_field("embeddings", Some(3e-5)),
+                    fake_field("R", Some(3e-5)),
                     fake_field("moe_correct_ridge", Some(9e-6)),
                 ],
             ),
@@ -1167,7 +1444,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_still_checks_ridge_on_small_multicluster() {
+    fn gate_checks_embeddings_on_small_multicluster() {
         let report = fake_report(vec![fake_row(
             "atlas-200 nclust=5",
             200,
@@ -1178,8 +1455,9 @@ mod tests {
             ],
         )]);
         let violations = parity_violations(&report);
-        assert_eq!(violations.len(), 1);
-        assert_eq!(violations[0].field, "moe_correct_ridge");
+        assert_eq!(violations.len(), 2);
+        assert!(violations.iter().any(|v| v.field == "embeddings"));
+        assert!(violations.iter().any(|v| v.field == "moe_correct_ridge"));
     }
 
     #[test]
