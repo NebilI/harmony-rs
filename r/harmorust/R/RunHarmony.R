@@ -128,6 +128,10 @@ RunHarmony.default <- function(
     seed = 1L,
     early_stop = isTRUE(early_stop)
   )
+  if (!exists(".Random.seed", envir = .GlobalEnv)) {
+    set.seed(NULL)
+  }
+  config$rng_state <- as.integer(get(".Random.seed", envir = .GlobalEnv))
 
   if (verbose && is.null(lambda)) {
     message("Using automatic lambda estimation")
@@ -142,6 +146,10 @@ RunHarmony.default <- function(
     ncores = ncores,
     verbose = verbose
   )
+
+  if (!is.null(result$rng_state)) {
+    assign(".Random.seed", as.integer(result$rng_state), envir = .GlobalEnv)
+  }
 
   obj <- .as_harmony_object(
     result,

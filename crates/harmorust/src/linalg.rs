@@ -1,11 +1,74 @@
 use crate::error::{HarmonyError, Result};
-use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, Axis};
+use ndarray::{s, Array1, Array2, ArrayView1, ArrayView2, Axis, ShapeBuilder};
+
+/// Column-major (Fortran) layout so each cell / cluster column is contiguous.
+pub fn zeros_f32_f(nrows: usize, ncols: usize) -> Array2<f32> {
+    Array2::<f32>::zeros((nrows, ncols).f())
+}
+
+/// Column-major `f64` workspace matching Armadillo's default storage.
+pub fn zeros_f64_f(nrows: usize, ncols: usize) -> Array2<f64> {
+    Array2::<f64>::zeros((nrows, ncols).f())
+}
+
+/// Two-accumulator `sum x²` matching Armadillo's small-n `vec_norm_2`.
+pub fn accu_sq_two(xs: impl IntoIterator<Item = f32>) -> f32 {
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+    let mut toggle = false;
+    for x in xs {
+        if toggle {
+            acc2 += x * x;
+        } else {
+            acc1 += x * x;
+        }
+        toggle = !toggle;
+    }
+    acc1 + acc2
+}
+
+/// Armadillo `distance<eT,1>`: paired `(A-B)²` with two accumulators.
+pub fn euclid2_two_acc(a: impl Fn(usize) -> f32, b: impl Fn(usize) -> f32, n: usize) -> f32 {
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+    let mut i = 0usize;
+    let mut j = 1usize;
+    while j < n {
+        let ti = a(i) - b(i);
+        let tj = a(j) - b(j);
+        acc1 += ti * ti;
+        acc2 += tj * tj;
+        i += 2;
+        j += 2;
+    }
+    if i < n {
+        let ti = a(i) - b(i);
+        acc1 += ti * ti;
+    }
+    acc1 + acc2
+}
 
 pub fn l2_normalize_columns(z: ArrayView2<'_, f64>) -> Array2<f64> {
-    // Harmony stores the loop in `float`; match that rounding.
+    // Harmony / Armadillo: two-accumulator ||x||₂ when d < 32 (typical PC count).
     let mut out = z.mapv(|v| v as f32);
+    let d = out.nrows();
     for mut col in out.columns_mut() {
-        let norm = col.dot(&col).sqrt();
+        let norm = if d < 32 {
+            let mut acc1 = 0.0f32;
+            let mut acc2 = 0.0f32;
+            let mut i = 0usize;
+            while i + 1 < d {
+                acc1 += col[i] * col[i];
+                acc2 += col[i + 1] * col[i + 1];
+                i += 2;
+            }
+            if i < d {
+                acc1 += col[i] * col[i];
+            }
+            (acc1 + acc2).sqrt()
+        } else {
+            col.dot(&col).sqrt()
+        };
         if norm > 0.0 {
             col.mapv_inplace(|v| v / norm);
         }
@@ -232,23 +295,34 @@ pub fn softmax_neg_dist(dist: ArrayView2<'_, f64>, sigma: ArrayView1<'_, f64>) -
         return Array2::<f64>::zeros((k, n));
     }
 
-    // Harmony C++: R = exp(-dist / σ) then L1-normalise columns, in float.
+    // Harmony C++: `R = -dist; R.each_col() /= sigma; R = exp(R)` then
+    // `R.each_row() /= sum(R, 0)`. Division, not multiply-by-reciprocal.
     // Cosine distances stay in [0, 4], so expf does not overflow at σ=0.1.
-    let mut r32 = Array2::<f32>::zeros((k, n));
-    let mut sum = vec![0.0f32; n];
+    let mut r32 = zeros_f32_f(k, n);
     for i in 0..k {
-        let inv_sigma = 1.0f32 / (sigma[i] as f32);
+        let sig = sigma[i] as f32;
         let drow = dist.row(i);
         for j in 0..n {
-            let v = (-(drow[j] as f32) * inv_sigma).exp();
-            r32[[i, j]] = v;
-            sum[j] += v;
+            r32[[i, j]] = (-(drow[j] as f32) / sig).exp();
         }
     }
-    for i in 0..k {
-        for j in 0..n {
-            if sum[j] > 0.0 {
-                r32[[i, j]] /= sum[j];
+    for j in 0..n {
+        // Armadillo `sum(R, 0)` on a column: two-accumulator over K.
+        let mut acc1 = 0.0f32;
+        let mut acc2 = 0.0f32;
+        let mut i = 0usize;
+        while i + 1 < k {
+            acc1 += r32[[i, j]];
+            acc2 += r32[[i + 1, j]];
+            i += 2;
+        }
+        if i < k {
+            acc1 += r32[[i, j]];
+        }
+        let s = acc1 + acc2;
+        if s > 0.0 {
+            for i in 0..k {
+                r32[[i, j]] /= s;
             }
         }
     }

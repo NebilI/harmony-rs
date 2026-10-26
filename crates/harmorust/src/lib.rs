@@ -16,6 +16,7 @@
 //! seurust  →  neighbors / clustering on the harmony reduction
 //! ```
 
+pub mod binio;
 pub mod cluster;
 pub mod compare;
 pub mod config;
@@ -27,14 +28,16 @@ pub mod linalg;
 pub mod metrics;
 mod vectormath;
 pub mod parity;
-mod r_rng;
+pub mod r_rng;
+mod reference;
 pub mod simulate;
+pub mod timers;
 
-pub use config::HarmonyConfig;
+pub use config::{r_round_half_even, HarmonyConfig};
 pub use error::{HarmonyError, Result};
 pub use harmony::{embeddings_from_rows, run_harmony, run_harmony_multi, HarmonyResult, HarmonyState};
 pub use metrics::{evaluate, IntegrationMetrics};
-pub use parity::{assert_parity_within, PARITY_MAX_ABS};
+pub use parity::{assert_parity_within, parity_max_abs, PARITY_MAX_ABS};
 pub use simulate::{simulate_atlas, SimulateSpec, SimulatedAtlas};
 
 #[cfg(test)]
@@ -166,6 +169,36 @@ mod tests {
         let labels = vec!["a", "b", "a", "b"];
         let err = run_harmony(z.view(), &labels, &HarmonyConfig::default()).unwrap_err();
         assert!(err.to_string().contains("fewer than 6"));
+    }
+
+    #[test]
+    fn thread_count_does_not_change_bits() {
+        let spec = SimulateSpec {
+            n_cells: 90,
+            n_pcs: 4,
+            n_batches: 2,
+            n_types: 3,
+            batch_strength: 2.0,
+            seed: 5,
+        };
+        let data = simulate_atlas(&spec);
+        let z = embeddings_from_rows(&data.embeddings).unwrap();
+        let mut cfg = HarmonyConfig::default();
+        cfg.nclust = Some(4);
+        cfg.max_iter = 3;
+        cfg.seed = 99;
+        let run = |threads: usize| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            pool.install(|| run_harmony(z.view(), &data.batch, &cfg).unwrap())
+        };
+        let a = run(1);
+        let b = run(4);
+        assert_eq!(a.embeddings, b.embeddings);
+        assert_eq!(a.r, b.r);
+        assert_eq!(a.n_iter, b.n_iter);
     }
 
     #[test]
