@@ -1,0 +1,7 @@
+inst/bin/
+tools/rust/
+.Rproj.user
+.Rhistory
+.RData
+*.Rcheck
+*_*.tar.gz

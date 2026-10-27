@@ -1,0 +1,12 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.git$
+^\.github$
+^\.vscode$
+^\.prepare$
+^PUBLISH\.md$
+^universe-entry\.json$
+^tools/rust/target$
+^inst/bin$
+^LICENSE\.md$
+Rplots\.pdf
