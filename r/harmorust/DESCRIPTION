@@ -23,5 +23,6 @@ Imports: jsonlite, stats
 Suggests: Seurat (>= 4.1.1), SingleCellExperiment, ggplot2, seurust, testthat (>= 3.0.0)
 SystemRequirements: Cargo (Rust's package manager), rustc (>= 1.89)
 Config/testthat/edition: 3
+Config/runiverse/republish: 2026-10-27
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
