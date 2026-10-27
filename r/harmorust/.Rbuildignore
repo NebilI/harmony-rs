@@ -2,6 +2,7 @@
 ^\.Rproj\.user$
 ^\.git$
 ^\.github$
+^\.gitignore$
 ^\.vscode$
 ^\.prepare$
 ^PUBLISH\.md$

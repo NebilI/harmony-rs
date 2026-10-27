@@ -4,7 +4,7 @@ Version: 0.1.0
 Authors@R: person(
     given = "Nebil",
     family = "Ibrahim",
-    email = "nebil.b.ibrahim@gmail.com",
+    email = "nebil080298@gmail.com",
     role = c("aut", "cre")
     )
 Description: 'Rust' reimplementation of the 'Harmony' integration loop

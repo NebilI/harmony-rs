@@ -34,7 +34,6 @@ it. Publishing notes are in [r/harmorust/PUBLISH.md](r/harmorust/PUBLISH.md).
 | Path | Role |
 | --- | --- |
 | `crates/harmorust` | Rust crate + CLI. This is the kernel. |
-| `web` | Next.js demo: synthetic atlas, before/after PCs, LISI. |
 | `r/harmorust` | R package with Harmony's public API (`RunHarmony` for matrix / Seurat / SCE, `harmony_options`, convergence plot). Calls the Rust CLI. |
 | `examples/with_seurust.R` | How the two packages sit in one Seurat workflow. |
 
@@ -72,30 +71,6 @@ harmorust::HarmonyConvergencePlot(corrected)
 ```
 
 See [PARITY.md](PARITY.md) for the Harmony 2.0.5 checklist: API surface, speed tables, and remaining numerical differences.
-
-## GitHub source, Origin mirror
-
-| Role | Repo |
-| --- | --- |
-| Source of truth | https://github.com/NebilI/harmony-rs (private) |
-| Mirror (browse / agents) | https://cursor.com/codebase/nebil-ibrahim/harmony-rs |
-
-GitHub already has `main`. To make the existing Origin repo a GitHub mirror (GitHub stays the source of truth; Origin browse/search stay put), you need the [Cursor GitHub app](https://cursor.com/docs/origin/mirror-github) on `NebilI`, then from WSL / macOS / Linux:
-
-```sh
-origin auth login
-RECREATE_ORIGIN_MIRROR=1 ./scripts/mirror-github.sh
-```
-
-Or in the UI: [cursor.com/codebase](https://cursor.com/codebase) → Sync from GitHub → `NebilI/harmony-rs`. If the native Origin name is taken, delete or detach that copy first.
-
-After the mirror is attached, pushes to the Origin remote go to GitHub; Origin updates after GitHub accepts them. See [Mirror a GitHub repository](https://cursor.com/docs/origin/mirror-github).
-
-Push-only updates to GitHub:
-
-```sh
-./scripts/push-github.sh
-```
 
 ## Run the Rust kernel
 
@@ -166,16 +141,6 @@ cargo run -p harmorust -- run < request.json
 `HarmonyConfig` uses the same names as `harmony::RunHarmony` / `harmony_options`: `theta`, `sigma`, `lambda`, `nclust`, `max_iter`, `block_size`, `tau`, `alpha`.
 
 Match `nclust` to the biology (cell types), not to `batches × types`. Too many clusters lets k-means isolate each donor-type blob; Harmony2 then skips ridge correction for clusters that contain only one batch.
-
-## Run the demo
-
-```sh
-cd web
-npm install
-npm run dev -- --port 43147 --hostname 127.0.0.1
-```
-
-The page generates a small atlas, runs the Harmony loop, and plots PC1/PC2 colored by donor or cell type.
 
 ## Algorithm (Harmony2)
 

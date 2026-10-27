@@ -19,7 +19,7 @@
   \code{\link{RunHarmony}} corrects batch effects.
 }
 \author{
-  Nebil Ibrahim \email{nebil.b.ibrahim@gmail.com}
+  Nebil Ibrahim \email{nebil080298@gmail.com}
 }
 \seealso{
   \code{\link{RunHarmony}}, \code{\link{harmony_options}},
