@@ -1,3 +1,5 @@
+utils::globalVariables(c("idx", "val", "harmony_idx"))
+
 #' Plot Harmony objective over clustering steps
 #'
 #' Same role as the unexported `HarmonyConvergencePlot` helper in

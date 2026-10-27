@@ -14,6 +14,21 @@ type separation   3.21 → 3.21
 
 `nclust = 1` reduces to ordinary ridge regression and removes a global batch shift (2.75 → 0.02), which is the diagnostic Harmony itself documents.
 
+## Install the R package (0.1.0)
+
+[![r-universe version](https://NebilI.r-universe.dev/harmorust/badges/version)](https://NebilI.r-universe.dev/harmorust)
+
+```r
+install.packages(
+  "harmorust",
+  repos = c("https://NebilI.r-universe.dev", "https://cloud.r-project.org")
+)
+```
+
+Source installs need R ≥ 4.2 and Cargo / rustc ≥ 1.89. The CLI is compiled
+into the package `bin` directory; you only need `HARMORUST_BIN` to override
+it. Publishing notes are in [r/harmorust/PUBLISH.md](r/harmorust/PUBLISH.md).
+
 ## What is in this repo
 
 | Path | Role |
@@ -36,9 +51,10 @@ counts
 Harmony never touches the count matrix. If seurust already got you to PCA, this crate is the integration step.
 
 ```r
-# build the CLI once, then point R at it
-# cargo build -p harmorust --release
-# export HARMORUST_BIN=$PWD/target/release/harmorust
+install.packages(
+  c("seurust", "harmorust"),
+  repos = c("https://NebilI.r-universe.dev", "https://cloud.r-project.org")
+)
 
 seurat <- RunPCA(seurat)
 seurat <- harmorust::RunHarmony(seurat, group.by.vars = "donor")

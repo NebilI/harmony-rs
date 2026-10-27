@@ -1,17 +1,27 @@
 Package: harmorust
-Title: Rust Native Kernels for Harmony Single-Cell Integration
+Title: 'Rust' Native Kernels for 'Harmony' Single-Cell Integration
 Version: 0.1.0
-Authors@R: person("Nebil", "Ibrahim", role = c("aut", "cre"))
-Description: Rust reimplementation of the Harmony integration loop
+Authors@R: person(
+    given = "Nebil",
+    family = "Ibrahim",
+    email = "nebil.b.ibrahim@gmail.com",
+    role = c("aut", "cre")
+    )
+Description: 'Rust' reimplementation of the 'Harmony' integration loop
     (soft k-means, diversity penalty, mixture-of-experts ridge) with the
-    same RunHarmony() signature used by the immunogenomics Harmony R
-    package. Designed to sit next to seurust: Seurat/seurust produce the
-    PCA embedding, harmorust corrects it.
+    same RunHarmony() signature used by the immunogenomics 'Harmony' R
+    package. Designed to sit next to 'seurust': 'Seurat'/'seurust' produce the
+    PCA embedding, 'harmorust' corrects it. Installing from source builds the
+    'harmorust' CLI with Cargo and places it in the package 'bin' directory.
 License: MIT + file LICENSE
+URL: https://github.com/NebilI/harmony-rs,
+    https://NebilI.r-universe.dev/harmorust
+BugReports: https://github.com/NebilI/harmony-rs/issues
 Encoding: UTF-8
 Depends: R (>= 4.2)
-Imports: methods, Matrix, jsonlite, stats
-Suggests: Seurat (>= 4.1.1), SingleCellExperiment, ggplot2, seurust, testthat
-SystemRequirements: Cargo (Rust's package manager), rustc >= 1.81; the
-    harmorust CLI binary on PATH or HARMORUST_BIN
+Imports: jsonlite, stats
+Suggests: Seurat (>= 4.1.1), SingleCellExperiment, ggplot2, seurust, testthat (>= 3.0.0)
+SystemRequirements: Cargo (Rust's package manager), rustc (>= 1.89)
+Config/testthat/edition: 3
+Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2

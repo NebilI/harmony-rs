@@ -1,0 +1,3 @@
+#!/bin/sh
+rm -rf tools/rust/target
+rm -f inst/bin/harmorust inst/bin/harmorust.exe

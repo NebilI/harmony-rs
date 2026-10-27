@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Build the harmorust CLI and install it under inst/bin for the R package.
+: "${R_HOME=`R RHOME`}"
+"${R_HOME}/bin/Rscript" tools/build-kernel.R

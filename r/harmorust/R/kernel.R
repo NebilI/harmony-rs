@@ -1,7 +1,8 @@
 #' Locate the harmorust CLI binary.
 #'
-#' Resolution order: `HARMORUST_BIN`, `Sys.which("harmorust")`, then common
-#' cargo `target/release` paths relative to this source tree / working directory.
+#' Resolution order: `HARMORUST_BIN`, the binary installed with this package
+#' (`inst/bin`), `Sys.which("harmorust")`, then common cargo `target/release`
+#' paths relative to this source tree / working directory.
 #'
 #' @return Absolute path to the binary.
 #' @keywords internal
@@ -10,30 +11,40 @@
   if (nzchar(env) && file.exists(env)) {
     return(normalizePath(env, winslash = "/", mustWork = TRUE))
   }
+  bin_name <- if (.Platform$OS.type == "windows") "harmorust.exe" else "harmorust"
+  pkg_bin <- tryCatch(
+    system.file("bin", bin_name, package = "harmorust", mustWork = FALSE),
+    error = function(e) ""
+  )
+  candidates <- character()
+  if (nzchar(pkg_bin)) {
+    candidates <- c(candidates, pkg_bin)
+  }
   on_path <- Sys.which("harmorust")
   if (nzchar(on_path)) {
-    return(normalizePath(on_path, winslash = "/", mustWork = TRUE))
+    candidates <- c(candidates, on_path)
   }
   candidates <- c(
-    file.path(getwd(), "target", "release", "harmorust"),
-    file.path(getwd(), "..", "target", "release", "harmorust"),
-    file.path(getwd(), "..", "..", "target", "release", "harmorust")
+    candidates,
+    file.path(getwd(), "target", "release", bin_name),
+    file.path(getwd(), "..", "target", "release", bin_name),
+    file.path(getwd(), "..", "..", "target", "release", bin_name)
   )
   pkg_dir <- tryCatch(system.file(package = "harmorust"), error = function(e) "")
   if (nzchar(pkg_dir)) {
     candidates <- c(
       candidates,
-      file.path(pkg_dir, "bin", "harmorust"),
-      file.path(dirname(dirname(pkg_dir)), "target", "release", "harmorust")
+      file.path(dirname(dirname(pkg_dir)), "target", "release", bin_name)
     )
   }
   for (path in candidates) {
-    if (file.exists(path)) {
+    if (nzchar(path) && file.exists(path)) {
       return(normalizePath(path, winslash = "/", mustWork = TRUE))
     }
   }
   stop(
-    "Could not find the harmorust binary. Build it with ",
+    "Could not find the harmorust binary. A source install builds it into ",
+    "the package bin directory. You can also run ",
     "`cargo build -p harmorust --release`, put it on PATH, or set HARMORUST_BIN.",
     call. = FALSE
   )

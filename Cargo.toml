@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/harmorust"]
+exclude = ["r/harmorust/tools/rust"]
 resolver = "2"
 
 [workspace.package]

@@ -6,9 +6,12 @@
 
 library(Seurat)
 
-# library(seurust)    # install.packages("seurust", repos = "https://nebili.r-universe.dev")
-# library(harmorust)  # needs HARMORUST_BIN or harmorust on PATH
-# Sys.setenv(HARMORUST_BIN = "target/release/harmorust")
+# install.packages(
+#   c("seurust", "harmorust"),
+#   repos = c("https://NebilI.r-universe.dev", "https://cloud.r-project.org")
+# )
+# library(seurust)
+# library(harmorust)
 
 # counts <- Read10X("path/to/filtered_feature_bc_matrix")
 # obj <- CreateSeuratObject(counts)
