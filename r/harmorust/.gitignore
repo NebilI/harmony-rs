@@ -1,5 +1,7 @@
 inst/bin/
 tools/rust/
+target/
+vendor/
 .Rproj.user
 .Rhistory
 .RData

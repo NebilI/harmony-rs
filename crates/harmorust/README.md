@@ -10,4 +10,4 @@ let z = harmorust::embeddings_from_rows(&data.embeddings)?;
 let out = run_harmony(z.view(), &data.batch, &HarmonyConfig::default())?;
 ```
 
-See the repository README for the seurust workflow and the web demo.
+See the repository README for the seurust workflow.
