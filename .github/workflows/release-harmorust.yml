@@ -1,0 +1,60 @@
+name: Release harmorust
+
+# Publishes the version in r/harmorust/DESCRIPTION to GitHub Releases and
+# r-universe. An existing release tag is reused. Run it from the Actions tab
+# (Release harmorust → Run workflow) to republish the current version. A push
+# to main that changes r/harmorust/DESCRIPTION does the same.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - r/harmorust/DESCRIPTION
+
+concurrency:
+  group: release-harmorust
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.rel.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create release for new DESCRIPTION version
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=$(awk '/^Version:[[:space:]]*/ { print $2; exit }' r/harmorust/DESCRIPTION)
+          if [ -z "${version}" ]; then
+            echo "Could not read Version from r/harmorust/DESCRIPTION" >&2
+            exit 1
+          fi
+          tag="v${version}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "Release ${tag} already exists."
+            exit 0
+          fi
+          gh release create "${tag}" \
+            --target "${GITHUB_SHA}" \
+            --title "harmorust ${version}" \
+            --notes "harmorust ${version}. See r/harmorust/NEWS.md."
+
+  publish-r:
+    name: Publish R package and r-universe
+    needs: create-release
+    uses: ./.github/workflows/publish-harmorust-r.yml
+    with:
+      tag: ${{ needs.create-release.outputs.tag }}
+    secrets: inherit

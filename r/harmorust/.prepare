@@ -1,0 +1,6 @@
+#!/bin/sh
+# R-universe runs this before R CMD build so the source tarball contains
+# a standalone copy of the Rust crate (the package lives in a subdirectory).
+set -eu
+cd "$(dirname "$0")"
+exec ./tools/prepare-rust.sh

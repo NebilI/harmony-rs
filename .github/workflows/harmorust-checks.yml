@@ -1,0 +1,105 @@
+name: harmorust Checks
+
+on:
+  pull_request:
+    paths:
+      - "r/harmorust/**"
+      - "crates/harmorust/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/harmorust-checks.yml"
+      - ".github/workflows/publish-harmorust-r.yml"
+      - ".github/workflows/release-harmorust.yml"
+      - "scripts/sync-r-universe.sh"
+  push:
+    branches: [main]
+    paths:
+      - "r/harmorust/**"
+      - "crates/harmorust/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/harmorust-checks.yml"
+      - ".github/workflows/publish-harmorust-r.yml"
+      - ".github/workflows/release-harmorust.yml"
+      - "scripts/sync-r-universe.sh"
+  workflow_dispatch:
+
+concurrency:
+  group: harmorust-checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-harmorust:
+    name: "check harmorust (ubuntu)"
+    runs-on: ubuntu-latest
+    env:
+      NOT_CRAN: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: release
+          use-public-rspm: true
+          extra-repositories: "https://NebilI.r-universe.dev"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.89.0
+
+      - name: Add Cargo to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            r/harmorust/tools/rust/target
+          key: ${{ runner.os }}-cargo-harmorust-r-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-harmorust-r-
+
+      - name: Install R dependencies
+        uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          working-directory: r/harmorust
+          extra-packages: any::rcmdcheck any::testthat any::ggplot2
+          dependencies: '"hard"'
+
+      - name: Stage Rust crate into the R package
+        run: sh r/harmorust/tools/prepare-rust.sh
+
+      - name: Build source tarball
+        run: R CMD build r/harmorust
+
+      - name: Check source tarball
+        run: |
+          set +e
+          R CMD check harmorust_*.tar.gz --as-cran --no-manual 2>&1 | tee harmorust-check.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::group::R CMD check install log"
+            cat harmorust.Rcheck/00install.out || true
+            echo "::endgroup::"
+            exit "$status"
+          fi
+        env:
+          _R_CHECK_CRAN_INCOMING_: false
+          _R_CHECK_PACKAGE_SIZES_: false
+          _R_CHECK_FORCE_SUGGESTS_: false
+
+      - name: Upload check artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harmorust-pr-check
+          path: |
+            harmorust-check.log
+            harmorust.Rcheck/00check.log
+            harmorust.Rcheck/00install.out
+          if-no-files-found: ignore
