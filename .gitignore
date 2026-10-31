@@ -1,7 +1,5 @@
 target/
 vendor/
-/agent-tools
-/tmp-scaffold
 **/*.rs.bk
 .DS_Store
 r/harmorust/tools/rust
@@ -11,4 +9,3 @@ r/harmorust/inst/bin
 .RData
 .Rproj.user
 harmorust_*.tar.gz
-seurust_*.tar.gz
