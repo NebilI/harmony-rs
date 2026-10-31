@@ -6,4 +6,4 @@ vendor/
 .Rhistory
 .RData
 *.Rcheck
-*_*.tar.gz
+harmorust_*.tar.gz
