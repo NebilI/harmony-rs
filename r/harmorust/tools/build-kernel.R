@@ -45,32 +45,50 @@ find_cargo <- function() {
 }
 
 cargo <- find_cargo()
-manifest <- src_file(pkg_root, "tools", "rust", "Cargo.toml")
+crate_dir <- src_file(pkg_root, "tools", "rust")
+manifest <- src_file(crate_dir, "Cargo.toml")
 if (!file.exists(manifest)) {
   stop("tools/rust/Cargo.toml missing after prepare-rust.sh")
 }
 
+# Do not pass env= to system2(). On Windows that is forwarded as extra cargo
+# arguments (`no such subcommand CARGO=...`) and r-universe Windows builds fail.
+# Run from the crate directory so wrappers such as rwasm's cargo can find
+# ./target after the build (they cd into it relative to the working directory).
+oldwd <- getwd()
+on.exit(setwd(oldwd), add = TRUE)
+setwd(crate_dir)
+
 message("Building harmorust CLI with ", cargo)
+rustc <- Sys.which("rustc")
+if (!nzchar(rustc)) {
+  rustc_candidates <- c(
+    file.path(dirname(cargo), if (.Platform$OS.type == "windows") "rustc.exe" else "rustc")
+  )
+  rustc <- rustc_candidates[[1]]
+}
+if (nzchar(rustc) && file.exists(rustc)) {
+  message(paste(system2(rustc, args = "--version", stdout = TRUE), collapse = " "))
+}
 build_status <- system2(
   cargo,
-  args = c("build", "--release", "--manifest-path", manifest, "--bin", "harmorust"),
-  env = c(paste0("CARGO=", cargo))
+  args = c("build", "--release", "--bin", "harmorust")
 )
 if (!identical(as.integer(build_status), 0L)) {
   stop("cargo build --release --bin harmorust failed with status ", build_status)
 }
 
 bin_name <- if (.Platform$OS.type == "windows") "harmorust.exe" else "harmorust"
-built <- src_file(pkg_root, "tools", "rust", "target", "release", bin_name)
+built <- src_file(crate_dir, "target", "release", bin_name)
 if (!file.exists(built)) {
-  # cargo may place the binary under target/<triple>/release on some hosts
+  # cargo / rwasm may place the binary under target/<triple>/release
   alt <- list.files(
-    src_file(pkg_root, "tools", "rust", "target"),
+    src_file(crate_dir, "target"),
     pattern = paste0("^", bin_name, "$"),
     recursive = TRUE,
     full.names = TRUE
   )
-  alt <- alt[grepl(file.path("release", bin_name), alt, fixed = TRUE)]
+  alt <- alt[grepl(paste0("release", .Platform$file.sep, bin_name, "$"), alt)]
   if (length(alt)) {
     built <- alt[[1]]
   }
